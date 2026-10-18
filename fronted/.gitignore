@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env.local
+.env.*.local
+
+# Temporary browser profile used for local UI verification.
+.qa-browser/

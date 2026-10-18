@@ -1,0 +1,49 @@
+import asyncio
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import FileResponse, StreamingResponse
+
+# 1. 创建应用
+app = FastAPI()
+
+
+@app.get("/sse1.html", include_in_schema=False)
+async def sse_page():
+    return FileResponse(Path(__file__).with_name("sse1.html"))
+
+
+
+# 2. 跨域
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许的源
+    allow_credentials=True,  # 允许携带cookie
+    allow_methods=["*"],  # 允许的请求方法
+    allow_headers=["*"],  # 允许的请求头
+)
+
+
+# 3. 定义生成器函数
+async def events_generator():
+    for i in range(5):
+        # SSE事件推流的固定格式 data: 内容\n\n
+        yield f"data: 这是第{i + 1}条消息\n\n"
+        await asyncio.sleep(1)
+    yield "data: [END]\n\n"
+
+
+# 4. 定义SSE接口路由
+@app.get("/simple_stream")
+async def simple_stream():
+
+    # 核心:生成器 + 流式媒体类型
+    return StreamingResponse(
+        events_generator(),
+        media_type="text/event-stream"
+    )
+
+if __name__ == '__main__':
+    uvicorn.run(app, host="127.0.0.1", port=8001)
