@@ -1,6 +1,6 @@
 // 浏览器负责 SSE 解码；这里统一处理终止、异常和资源释放。
 export function connectQueryStream(url, handlers, EventSourceClass = globalThis.EventSource) {
-  const source = new EventSourceClass(url)
+  const source = new EventSourceClass(url, { withCredentials: true })
   let closed = false
   const close = () => {
     if (closed) return

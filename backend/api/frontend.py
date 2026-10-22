@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, RedirectResponse
 
-FRONTEND_DIST = Path(__file__).resolve().parent.parent / "fronted" / "dist"
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "fronted" / "dist"
 
 
 def register_frontend(app: FastAPI, default_page: str) -> None:

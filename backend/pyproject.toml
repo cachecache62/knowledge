@@ -27,6 +27,10 @@ dependencies = [
     "dashscope>=1.27.7",
     "uvicorn[standard]>=0.54.0",
     "pypdf>=6.19.0",
+    "sqlalchemy>=2.0,<3",
+    "pymysql[rsa]>=1.1,<2",
+    "pwdlib[argon2]>=0.3,<1",
+    "email-validator>=2.2,<3",
 ]
 
 

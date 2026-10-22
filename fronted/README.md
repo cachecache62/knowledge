@@ -1,6 +1,6 @@
 # 掌柜智库 Vue 3 前端
 
-由 `test/fastapi/web/page/import.html` 和 `chat.html` 迁移而来，使用 Vue 3 Composition API、Vue Router 和 Vite。配套后端入口位于项目根目录的 `api/`。
+使用 Vue 3 Composition API、Vue Router 和 Vite。前端保存在 `fronted/`，后端入口位于 `backend/api/`。MySQL 初始化与账户服务配置见 [登录配置说明](../backend/AUTH.md)。
 
 ## 启动
 
@@ -19,35 +19,37 @@ npm run dev
 - 登录页：`http://127.0.0.1:5173/#/login`
 - 注册页：`http://127.0.0.1:5173/#/register`
 
-登录、注册页与问答、资料库使用统一的灰白配色，支持邮箱校验、密码显隐及注册确认密码。当前后端未提供账号鉴权接口，因此提交只进行本地校验并提示页面预览，不发送认证请求或模拟登录成功，也不保存账号或密码。注册的 8 位最小密码长度为暂定设计规则，接入服务端时应核对实际约束。账号页不进入 KeepAlive 缓存；离开账号页后重新进入会清空表单，登录与注册切换时保留邮箱并清空密码。问答和导入页仍保留原有状态与访问方式。
+启动时先校验登录状态，未登录仅展示登录、注册页面，不创建业务页面或请求业务数据。注册成功自动登录，随后回到此前请求的问答或导入页；过期时回到登录页，侧边栏提供退出按钮。后端通过持久化的 HttpOnly Cookie 维护会话，默认登录有效期为 6 小时，期间刷新页面或关闭再打开普通浏览器会自动恢复登录；页面访问不会延长有效期。前端不保存密码或登录令牌。注册密码为 8～128 位，支持邮箱校验、密码显隐及确认密码。
 
-另开两个终端，在 Python 项目根目录启动现有后端：
+按登录配置说明准备 MySQL 并初始化数据库后，另开三个终端，在 `backend` 目录启动：
 
 ```powershell
+uv run uvicorn api.auth_service:app --host 127.0.0.1 --port 8002
 uv run uvicorn api.import_service:app --host 127.0.0.1 --port 8000
 uv run uvicorn api.query_service:app --host 127.0.0.1 --port 8001
 ```
 
-前端可以独立启动；完整业务仍需后端所依赖的数据库、模型和外部服务。
+进入业务页需要账户服务和 MySQL 可用；完整问答和导入仍需对应后端及其模型、数据库和外部服务。
 
 ## 界面与会话
 
 页面采用浅色侧边栏、居中的回答区和底部圆角输入框。侧边栏支持新对话、搜索最近对话、资料库和账号入口，窄屏下可展开收起。回答支持基础 Markdown 标题、列表、引用、行内代码和代码块，可以复制回答与代码。
 
-最近对话的 ID 和标题保存在当前浏览器的 `kb_conversations`，沿用 `kb_session_id` 保存当前会话。正文仍由后端历史接口读取；列表仅包含当前浏览器记录的会话。回答期间禁止切换会话，切换到资料库后问答继续执行。资料库保留原有上传与进度查询。
+最近对话按用户 ID 保存在当前浏览器的 `kb_conversations:<user_id>`，当前会话使用 `kb_session_id:<user_id>`。正文由带身份校验的历史接口读取，列表仅包含该账号在本浏览器记录的会话。退出销毁业务缓存。回答期间禁止切换会话，切换到资料库后问答继续执行。资料库保留原有上传与进度查询。
 
 ## API 地址
 
-默认导入服务为 `http://127.0.0.1:8000`，问答服务为 `http://127.0.0.1:8001`。
+默认导入服务为 `http://127.0.0.1:8000`，问答服务为 `http://127.0.0.1:8001`，账户服务为 `http://127.0.0.1:8002`。
 
 需要自定义时，可在前端目录自行创建 `.env.local`：
 
 ```dotenv
 VITE_IMPORT_API_BASE=http://127.0.0.1:8000
 VITE_QUERY_API_BASE=http://127.0.0.1:8001
+VITE_AUTH_API_BASE=http://127.0.0.1:8002
 ```
 
-修改后重启 Vite；生产构建前也需设置为浏览器实际可访问的地址。`VITE_` 配置会进入浏览器资源，不应放密钥。根目录的 Python `.env` 不需要修改。
+修改后重启 Vite；生产构建前也需设置为浏览器实际可访问的地址。`VITE_` 配置会进入浏览器资源，不应放数据库密码。前端与三个服务统一使用 `127.0.0.1` 或统一使用 `localhost`；后端 `AUTH_ALLOWED_ORIGINS` 需包含实际前端来源。MySQL 配置只放在后端。
 
 ## 功能与结构
 
@@ -60,7 +62,7 @@ src/
 ├── views/
 │   ├── ImportView.vue       # 多文件选择/拖拽上传、每两秒轮询任务、节点日志
 │   ├── ChatView.vue         # 会话、历史、同步问答、SSE 问答、清空历史
-│   └── AuthView.vue         # 登录/注册页面预览、校验和密码显隐
+│   └── AuthView.vue         # 注册、登录、校验和密码显隐
 ├── components/
 │   ├── AnswerContent.vue    # 答案文本和参考图片
 │   └── TaskProgress.vue     # 可折叠的节点进度
@@ -71,7 +73,7 @@ src/
 
 上传字段保持 `files`，使用 `/upload` 返回的 `task_ids` 查询 `/status/{task_id}`。后台按小写扩展名判断文件，所以上传仅接受 `.pdf`、`.md`。
 
-问答请求字段保持 `query`、`session_id`、`is_stream`，会话使用原有 `kb_session_id` 本地存储键。流式模式先 POST `/query`，再连接 `/stream/{session_id}`；处理 `progress`、`delta`、`final`、`error`，也兼容 `final_answer`。非流式直接展示 POST 返回的答案。
+问答字段保持 `query`、`session_id`、`is_stream`。所有请求携带登录 Cookie，业务接口返回 401 时清理登录状态并跳转。流式模式先 POST `/query`，再通过带凭据的 EventSource 连接 `/stream/{session_id}`；处理 `progress`、`delta`、`final`、`error`，也兼容 `final_answer`。非流式直接展示 POST 返回的答案。
 
 轮询请求不会重叠，连续五次请求失败后可以手动重试进度查询；这不会重新上传文件。切换页面时任务继续进行，销毁应用时取消请求、定时器与 SSE。发送期间禁用再次发送和清空，避免同一会话的流式队列被覆盖。
 

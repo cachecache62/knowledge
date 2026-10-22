@@ -1,5 +1,8 @@
 <script setup>
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { authenticate, authError } from '../state/auth.js'
+import { safeDestination } from '../utils/authRedirect.js'
 
 defineOptions({ name: 'AuthView' })
 const props = defineProps({ mode: { type: String, default: 'login' } })
@@ -13,6 +16,12 @@ const showPassword = ref(false)
 const showConfirm = ref(false)
 const submitted = ref(false)
 const feedback = ref('')
+const submitting = ref(false)
+const route = useRoute()
+const router = useRouter()
+let submitController
+let submitVersion = 0
+const accountLinkQuery = computed(() => route.query.redirect ? { redirect: safeDestination(route.query.redirect) } : {})
 
 function validate(field) {
   if (field === 'email') {
@@ -22,7 +31,7 @@ function validate(field) {
   } else if (field === 'password') {
     errors.password = !form.password
       ? '请输入密码'
-      : isRegister.value && form.password.length < 8 ? '密码至少需要 8 位' : ''
+      : isRegister.value && form.password.length < 8 ? '密码至少需要 8 位' : form.password.length > 128 ? '密码不能超过 128 位' : ''
   } else if (field === 'confirmPassword') {
     errors.confirmPassword = !form.confirmPassword
       ? '请再次输入密码'
@@ -42,6 +51,7 @@ function onBlur(field) {
 }
 
 async function submit() {
+  if (submitting.value) return
   submitted.value = true
   form.email = form.email.trim()
   await nextTick()
@@ -53,11 +63,29 @@ async function submit() {
     inputs[invalid[0]].value?.focus()
     return
   }
-  // 项目尚无鉴权接口：只验证表单，不模拟登录成功、不保存凭据。
-  feedback.value = '表单校验通过。当前为页面预览，暂不执行登录或注册。'
+  submitting.value = true
+  feedback.value = ''
+  const version = ++submitVersion
+  submitController = new AbortController()
+  try {
+    await authenticate(isRegister.value ? 'register' : 'login', { email: form.email, password: form.password }, submitController.signal)
+    if (version !== submitVersion || submitController.signal.aborted) return
+    form.password = ''
+    form.confirmPassword = ''
+    await router.replace(safeDestination(route.query.redirect))
+  } catch (error) {
+    if (version !== submitVersion || submitController.signal.aborted) return
+    feedback.value = error.message || '账户服务请求失败，请稍后重试。'
+    if (error.status === 409) errors.email = error.message
+  } finally {
+    if (version === submitVersion) submitting.value = false
+  }
 }
 
 watch(() => props.mode, () => {
+  submitVersion++
+  submitController?.abort()
+  submitting.value = false
   form.password = ''
   form.confirmPassword = ''
   Object.keys(errors).forEach(field => { errors[field] = '' })
@@ -66,6 +94,7 @@ watch(() => props.mode, () => {
   submitted.value = false
   feedback.value = ''
 })
+onBeforeUnmount(() => { submitVersion++; submitController?.abort(); form.password = ''; form.confirmPassword = '' })
 </script>
 
 <template>
@@ -78,7 +107,7 @@ watch(() => props.mode, () => {
           <span>连接资料、知识与每一个好问题</span>
         </div>
       </div>
-      <div class="top-actions"><span class="pill">页面预览</span></div>
+      <div class="top-actions"><span class="pill">账号中心</span></div>
     </header>
 
     <div class="auth-content">
@@ -114,13 +143,13 @@ watch(() => props.mode, () => {
 
       <section class="auth-form-section">
         <div class="auth-mode-links" aria-label="账号页面">
-          <RouterLink to="/login">登录</RouterLink>
-          <RouterLink to="/register">注册</RouterLink>
+          <RouterLink :to="{ path: '/login', query: accountLinkQuery }">登录</RouterLink>
+          <RouterLink :to="{ path: '/register', query: accountLinkQuery }">注册</RouterLink>
         </div>
         <h1 id="auth-heading">{{ isRegister ? '创建你的账号' : '欢迎回来' }}</h1>
         <p class="auth-subtitle">{{ isRegister ? '从这里开始，建立你的知识空间。' : '登录掌柜智库，继续你的知识探索。' }}</p>
 
-        <form novalidate @submit.prevent="submit">
+        <form novalidate :aria-busy="submitting" @submit.prevent="submit">
           <div class="auth-field">
             <label for="auth-email">邮箱地址</label>
             <div class="auth-input-wrap">
@@ -167,18 +196,18 @@ watch(() => props.mode, () => {
             <p v-if="errors.confirmPassword" id="auth-confirm-error" class="auth-error">{{ errors.confirmPassword }}</p>
           </div>
 
-          <button class="btn auth-submit" type="submit">
-            {{ isRegister ? '创建账号' : '登录' }}
+          <button class="btn auth-submit" type="submit" :disabled="submitting">
+            {{ submitting ? '正在提交…' : isRegister ? '创建账号' : '登录' }}
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <div class="auth-feedback" role="status" aria-live="polite" aria-atomic="true"><p v-if="feedback">{{ feedback }}</p></div>
+          <div class="auth-feedback" role="status" aria-live="polite" aria-atomic="true"><p v-if="feedback || authError">{{ feedback || authError }}</p></div>
         </form>
 
         <p class="auth-switch">
           {{ isRegister ? '已有账号？' : '还没有账号？' }}
-          <RouterLink :to="isRegister ? '/login' : '/register'">{{ isRegister ? '去登录' : '立即注册' }}</RouterLink>
+          <RouterLink :to="{ path: isRegister ? '/login' : '/register', query: accountLinkQuery }">{{ isRegister ? '去登录' : '立即注册' }}</RouterLink>
         </p>
-        <p class="auth-preview-note">当前为交互预览，提交不会登录或创建账号。</p>
+        <p class="auth-preview-note">{{ isRegister ? '创建账号后自动登录，即可开始使用知识库。' : '登录后即可使用知识库问答与资料导入。' }}</p>
       </section>
     </div>
   </main>

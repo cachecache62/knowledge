@@ -6,7 +6,7 @@ class FakeEventSource {
   static last
   listeners = new Map()
   closeCount = 0
-  constructor(url) { this.url = url; FakeEventSource.last = this }
+  constructor(url, options) { this.url = url; this.options = options; FakeEventSource.last = this }
   addEventListener(name, callback) { this.listeners.set(name, callback) }
   close() { this.closeCount += 1 }
   emit(name, data) { this.listeners.get(name)?.({ data }) }
@@ -25,6 +25,7 @@ function setup() {
 
 test('completed 进度之后继续接收 final，保留完整答案和图片，只关闭一次', () => {
   const { source, events, close } = setup()
+  assert.equal(source.options.withCredentials, true)
   source.emit('delta', JSON.stringify({ delta: '部分答案' }))
   source.emit('progress', JSON.stringify({ status: 'completed' }))
   assert.equal(source.closeCount, 0)

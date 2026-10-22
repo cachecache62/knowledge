@@ -1,5 +1,7 @@
 # 掌柜智库（knowledge-base）项目说明
 
+注册、登录、MySQL 用户表与前端访问控制已接入。首次运行请先阅读 [账户服务配置与初始化](AUTH.md)，完成 MySQL 配置并启动 8002 端口的账户服务。业务接口需要登录 Cookie。
+
 掌柜智库是一个面向商品与设备使用手册的知识库问答项目。它将 PDF / Markdown 文档解析、切分并向量化，用户提问后，结合本地知识库与网络搜索结果生成回答。项目采用 Python、FastAPI 和 LangGraph，提供文档导入页面、聊天页面、导入进度查询及 SSE 流式问答接口。
 
 本文根据当前仓库代码整理。项目版本为 `0.1.0`，主要用于学习与功能演示；以下启动方式和接口说明对应当前实现，完整业务运行需要准备外部服务和模型。
@@ -220,20 +222,26 @@ TEXT_RERANK_INSTRUCT=<该重排模型支持的指令内容>
 
 ## 5. 启动与使用
 
-### 5.1 启动两个服务
+### 5.1 启动三个服务
 
-在项目根目录打开两个终端。
+在 `backend` 目录打开三个终端；先按 [账户配置说明](AUTH.md) 初始化 MySQL。
+
+账户服务（独立于模型和 MinIO）：
+
+```powershell
+uv run uvicorn api.auth_service:app --host 127.0.0.1 --port 8002
+```
 
 终端一：文档导入服务。
 
 ```powershell
-uv run uvicorn test.fastapi.web.api.import_service:app --host 127.0.0.1 --port 8000
+uv run uvicorn api.import_service:app --host 127.0.0.1 --port 8000
 ```
 
 终端二：知识库查询服务。
 
 ```powershell
-uv run uvicorn test.fastapi.web.api.query_service:app --host 127.0.0.1 --port 8001
+uv run uvicorn api.query_service:app --host 127.0.0.1 --port 8001
 ```
 
 当前任务状态和 SSE 队列保存在进程内存中，按单进程启动。不要直接增加多个 worker，否则任务或流式队列可能落到不同进程。
@@ -246,7 +254,7 @@ uv run uvicorn test.fastapi.web.api.query_service:app --host 127.0.0.1 --port 80
 | `http://127.0.0.1:8001/docs` | 查询服务 Swagger 接口文档 |
 | `http://127.0.0.1:8001/health` | 查询 HTTP 服务健康检查，返回 `{"ok": true}` |
 
-页面的 API 地址分别写死为 `http://127.0.0.1:8000` 和 `http://127.0.0.1:8001`。更换主机或端口时，需要同步修改页面中的 `API_BASE`。`/health` 只证明 HTTP 服务能响应，不验证模型和全部外部服务。
+Vue 前端默认连接导入 8000、问答 8001、账户 8002，可通过 `fronted/.env.local` 的 `VITE_IMPORT_API_BASE`、`VITE_QUERY_API_BASE`、`VITE_AUTH_API_BASE` 配置。更换前端来源时还需更新 `AUTH_ALLOWED_ORIGINS`。`/health` 只证明 HTTP 服务能响应，不验证模型和全部外部服务。旧的 `test/fastapi/` 页面与服务是演示代码，请使用上面的正式入口。
 
 ### 5.2 基本使用顺序
 
@@ -260,6 +268,8 @@ uv run uvicorn test.fastapi.web.api.query_service:app --host 127.0.0.1 --port 80
 当前直接导入 Markdown 有边界问题：图片节点在没有 `images/` 或没有匹配图片时直接返回，没有将读出的内容写入 `md_content`，后续切分可能因缺少内容失败。上传接口也不会自动配套上传 Markdown 引用的图片目录。因此首次验证建议使用 PDF；Markdown 导入需要先处理该状态传递问题，并为图片准备正确目录。
 
 ## 6. HTTP 接口
+
+以下业务接口均要求有效登录 Cookie。前端自动携带 Cookie；直接使用 curl 等客户端时需先调用账户服务登录，并在后续请求携带 Cookie。本文的业务请求示例主要说明请求结构，账户接口见 [AUTH.md](AUTH.md)。
 
 ### 6.1 导入服务（8000）
 

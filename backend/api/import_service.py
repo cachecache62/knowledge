@@ -10,9 +10,9 @@ from typing import Any, BinaryIO
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
-from starlette.middleware.cors import CORSMiddleware
 
 from api.frontend import register_frontend
+from auth.dependencies import CurrentUser, Store, configure_auth_support
 from config.minio_config import minio_config
 from processor.import_processor.main_graph import KBImportWorkflow
 from tool.logger import logger
@@ -33,13 +33,7 @@ from utils.task_utils import (
 )
 
 app = FastAPI(title="掌柜智库-导入API", description="Vue 前端的文件导入及进度接口")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+configure_auth_support(app)
 register_frontend(app, "import")
 
 
@@ -71,7 +65,7 @@ def save_upload(source: BinaryIO, destination: Path) -> None:
     "/upload", summary="文件上传接口", description="接收 files 字段并返回 task_ids"
 )
 async def upload_files(
-    background_tasks: BackgroundTasks, files: list[UploadFile] = File(...)
+    background_tasks: BackgroundTasks, user: CurrentUser, store: Store, files: list[UploadFile] = File(...)
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="请选择要上传的文件")
@@ -96,6 +90,7 @@ async def upload_files(
 
     for file, filename in zip(files, filenames):
         task_id = str(uuid.uuid4())
+        await run_in_threadpool(store.remember_import, user.id, task_id)
         file_dir = data_dir / task_id
         import_file_path = file_dir / filename
         update_task_status(task_id, TASK_STATUS_PENDING)
@@ -145,7 +140,9 @@ async def upload_files(
 
 
 @app.get("/status/{task_id}", summary="任务状态查询")
-async def get_task_progress(task_id: str) -> dict[str, Any]:
+async def get_task_progress(task_id: str, user: CurrentUser, store: Store) -> dict[str, Any]:
+    if not await run_in_threadpool(store.owns_import, user.id, task_id):
+        raise HTTPException(status_code=404, detail="未找到此导入任务")
     status = get_task_status(task_id)
     if not status:
         raise HTTPException(

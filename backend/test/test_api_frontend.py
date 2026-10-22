@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api import frontend
+from auth.dependencies import get_current_user
+from auth.store import User, get_auth_store, utcnow
 from utils import sse_utils, task_utils
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +50,13 @@ class ApiFrontendTests(unittest.TestCase):
             cls.import_api = importlib.import_module("api.import_service")
 
     def setUp(self) -> None:
+        store = MagicMock()
+        store.chat_id.side_effect = lambda user_id, client_id, **kwargs: client_id
+        store.owns_import.return_value = True
+        for app in (self.query_api.app, self.import_api.app):
+            app.dependency_overrides[get_current_user] = lambda: User(1, "protocol@example.com", utcnow())
+            app.dependency_overrides[get_auth_store] = lambda: store
+            self.addCleanup(app.dependency_overrides.clear)
         for session_id in list(task_utils._tasks_status):
             task_utils.clear_task(session_id)
         sse_utils._session_stream.clear()
@@ -210,7 +219,8 @@ class ApiFrontendTests(unittest.TestCase):
                 "Access-Control-Request-Headers": "content-type",
             })
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.headers["access-control-allow-origin"], "*")
+            self.assertEqual(response.headers["access-control-allow-origin"], "http://127.0.0.1:5173")
+            self.assertEqual(response.headers["access-control-allow-credentials"], "true")
 
 
 if __name__ == "__main__":

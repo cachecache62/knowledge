@@ -1,11 +1,12 @@
 <script setup>
-import { computed, nextTick, onActivated, onDeactivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { QUERY_API_BASE, requestJson } from '../api.js'
 import AnswerContent from '../components/AnswerContent.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import { connectQueryStream } from '../utils/queryStream.js'
 import AppIcon from '../components/AppIcon.vue'
 import { activeSessionId, conversationBusy, conversations, rememberConversation, forgetConversation } from '../state/conversations.js'
+import { chatToolbar } from '../state/chatToolbar.js'
 
 const chatElement = ref(null)
 const inputElement = ref(null)
@@ -17,7 +18,6 @@ const clearing = ref(false)
 const connected = ref(false)
 const notice = ref('')
 const messages = ref([])
-const viewActive = ref(true)
 const copiedMessage = ref('')
 const currentTitle = computed(() => conversations.value.find(item => item.id === activeSessionId.value)?.title || '新对话')
 const lifetime = new AbortController()
@@ -29,6 +29,11 @@ let historyVersion = 0
 let copyTimer
 
 let sessionId = activeSessionId.value
+const toolbarState = reactive({
+  connected, clearing,
+  disabled: computed(() => sending.value || loadingHistory.value || clearing.value || !messages.value.length),
+  clear: clearHistory,
+})
 
 watch([sending, clearing], ([isSending, isClearing]) => { conversationBusy.value = isSending || isClearing }, { flush: 'sync' })
 watch(activeSessionId, (id) => {
@@ -214,15 +219,16 @@ async function clearHistory() {
 }
 
 onMounted(() => {
+  chatToolbar.value = toolbarState
   checkHealth()
   loadHistory()
   healthTimer = setInterval(checkHealth, 5000)
   window.addEventListener('resize', resizeInput)
 })
-onActivated(() => { viewActive.value = true; inputElement.value?.focus() })
-onDeactivated(() => { viewActive.value = false })
+onActivated(() => { chatToolbar.value = toolbarState; inputElement.value?.focus() })
 onBeforeUnmount(() => {
   disposed = true
+  if (chatToolbar.value === toolbarState) chatToolbar.value = null
   clearInterval(healthTimer)
   clearTimeout(copyTimer)
   window.removeEventListener('resize', resizeInput)
@@ -234,10 +240,6 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="chat-app" :class="{ 'chat-empty': !messages.length }">
-    <Teleport v-if="viewActive" to="#page-actions">
-      <span class="connection-status" :class="{ connected }" role="status"><span></span>{{ connected ? '服务已连接' : '服务未连接' }}</span>
-      <button class="text-button clear-button" :disabled="sending || loadingHistory || clearing || !messages.length" @click="clearHistory"><AppIcon name="trash" :size="16" /><span>{{ clearing ? '清空中…' : '清空对话' }}</span></button>
-    </Teleport>
     <div v-if="notice" class="notice" role="alert"><span>{{ notice }}</span><button class="icon-button" aria-label="关闭提示" @click="notice = ''"><AppIcon name="close" :size="15" /></button></div>
     <div ref="chatElement" class="chat" role="log" aria-label="聊天记录" aria-live="polite" aria-relevant="additions text">
       <div v-if="!messages.length" class="chat-welcome">

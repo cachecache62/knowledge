@@ -17,6 +17,7 @@ const paths = {
   sparkle: 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 2v4M18 4h4',
   upload: 'M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5',
   arrowRight: 'M4 12h16m-6-6 6 6-6 6',
+  logout: 'M9 4H4v16h5M9 12h12m-5-5 5 5-5 5',
 }
 </script>
 

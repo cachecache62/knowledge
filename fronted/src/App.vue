@@ -3,6 +3,8 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from './components/AppIcon.vue'
 import { activeSessionId, conversationBusy, conversations, newConversation, selectConversation } from './state/conversations.js'
+import { authChecked, currentUser, signOut } from './state/auth.js'
+import { chatToolbar } from './state/chatToolbar.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -11,6 +13,8 @@ const sidebarCollapsed = ref(false)
 const searchOpen = ref(false)
 const search = ref('')
 const searchInput = ref(null)
+const loggingOut = ref(false)
+const logoutError = ref('')
 const filteredConversations = computed(() => conversations.value.filter(item => item.title.toLowerCase().includes(search.value.trim().toLowerCase())))
 const pageTitle = computed(() => ({ '/import': '资料库', '/login': '账号中心', '/register': '账号中心' })[route.path] || '掌柜智库')
 
@@ -34,10 +38,27 @@ async function openSearch() {
 }
 
 watch(() => route.path, () => { sidebarOpen.value = false })
+
+async function logout() {
+  if (loggingOut.value) return
+  loggingOut.value = true
+  logoutError.value = ''
+  try {
+    await signOut()
+    await router.replace('/login')
+  } catch { logoutError.value = '退出失败，请检查账户服务连接后重试。' }
+  finally { loggingOut.value = false }
+}
 </script>
 
 <template>
-  <div class="workspace" :class="{ 'sidebar-collapsed': sidebarCollapsed, 'sidebar-open': sidebarOpen }" @keydown.esc="sidebarOpen = false">
+  <div v-if="!authChecked" class="auth-loading" role="status"><span class="send-spinner"></span><span>正在验证登录状态…</span></div>
+  <div v-else-if="route.meta.public || !currentUser" class="auth-shell">
+    <header class="auth-shell-header"><span class="site-name">掌柜智库<span class="brand-dot"></span></span><span>你的知识，触手可及</span></header>
+    <RouterView v-if="route.meta.public" />
+    <div v-else class="auth-loading" role="status">正在前往登录页…</div>
+  </div>
+  <div v-else class="workspace" :key="currentUser.id" :class="{ 'sidebar-collapsed': sidebarCollapsed, 'sidebar-open': sidebarOpen }" @keydown.esc="sidebarOpen = false">
     <button v-if="sidebarOpen" class="sidebar-backdrop" aria-label="关闭导航" @click="sidebarOpen = false"></button>
     <aside class="sidebar" aria-label="工作空间导航">
       <div class="sidebar-heading">
@@ -63,7 +84,8 @@ watch(() => route.path, () => { sidebarOpen.value = false })
 
       <div class="sidebar-footer">
         <div class="workspace-note"><span class="workspace-note-dot"></span>你的知识，触手可及</div>
-        <RouterLink class="account-link" to="/login"><span class="account-avatar">掌</span><span class="account-copy"><strong>我的工作空间</strong><small>登录以连接你的账号</small></span><AppIcon name="arrowRight" :size="16" /></RouterLink>
+        <div class="account-link"><span class="account-avatar">{{ currentUser.email[0].toUpperCase() }}</span><span class="account-copy"><strong>我的工作空间</strong><small :title="currentUser.email">{{ currentUser.email }}</small></span><button class="icon-button" :disabled="loggingOut" aria-label="退出登录" title="退出登录" @click="logout"><AppIcon name="logout" :size="18" /></button></div>
+        <p v-if="logoutError" class="logout-error" role="alert">{{ logoutError }}</p>
       </div>
     </aside>
 
@@ -74,10 +96,15 @@ watch(() => route.path, () => { sidebarOpen.value = false })
           <span class="page-title">{{ pageTitle }}</span>
           <span v-if="route.path === '/chat'" class="page-subtitle">知识库问答</span>
         </div>
-        <div id="page-actions" class="page-actions"></div>
+        <div id="page-actions" class="page-actions">
+          <template v-if="route.path === '/chat' && chatToolbar">
+            <span class="connection-status" :class="{ connected: chatToolbar.connected }" role="status"><span></span>{{ chatToolbar.connected ? '服务已连接' : '服务未连接' }}</span>
+            <button class="text-button clear-button" :disabled="chatToolbar.disabled" @click="chatToolbar.clear"><AppIcon name="trash" :size="16" /><span>{{ chatToolbar.clearing ? '清空中…' : '清空对话' }}</span></button>
+          </template>
+        </div>
       </header>
       <RouterView v-slot="{ Component }">
-        <KeepAlive exclude="AuthView"><component :is="Component" /></KeepAlive>
+        <KeepAlive :key="currentUser.id" exclude="AuthView"><component :is="Component" /></KeepAlive>
       </RouterView>
     </div>
   </div>
