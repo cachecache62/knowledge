@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import FileResponse, StreamingResponse
 
 from api.frontend import register_frontend
 from auth.dependencies import CurrentUser, Store, configure_auth_support
@@ -20,6 +21,7 @@ from tool.logger import logger
 from utils.minio_utils import get_minio_client
 
 from utils.import_registry import ImportRegistry, get_import_registry
+from utils.document_files import cleanup_document, download_document
 
 from utils.task_utils import (
     TASK_STATUS_COMPLETED,
@@ -27,6 +29,7 @@ from utils.task_utils import (
     TASK_STATUS_PENDING,
     TASK_STATUS_PROCESSING,
     add_done_task,
+    clear_task,
     # add_running_task,
     get_done_task_list,
     get_running_task_list,
@@ -39,6 +42,8 @@ from utils.task_utils import (
 
 from typing import Literal
 from fastapi import Query
+
+
 
 app = FastAPI(title="掌柜智库-导入API", description="Vue 前端的文件导入及进度接口")
 configure_auth_support(app)
@@ -191,6 +196,8 @@ async def upload_files(
                 continue
 
             # 4. 确认需要导入后，再记录任务归属。
+            relative_path = import_file_path.relative_to(Path(root_dir)).as_posix()
+            await run_in_threadpool(registry.remember_storage, task_id, relative_path)
             await run_in_threadpool(
                 store.remember_import,
                 user.id,
@@ -208,6 +215,10 @@ async def upload_files(
                     object_name=f"pdf_files/{day}/{task_id}/{filename}",
                     file_path=str(import_file_path),
                     content_type=content_type,
+                )
+                await run_in_threadpool(
+                    registry.remember_storage, task_id, relative_path,
+                    f"pdf_files/{day}/{task_id}/{filename}",
                 )
 
             except Exception:
@@ -364,6 +375,34 @@ async def list_documents(
         page,
         page_size,
     )
+
+@app.get("/documents/{task_id}/download", summary="下载原文档", response_model=None)
+async def download_document_file(task_id: uuid.UUID, user: CurrentUser) -> FileResponse | StreamingResponse:
+    registry = await run_in_threadpool(get_import_registry)
+    record = await run_in_threadpool(registry.get_document, user.id, str(task_id))
+    logger.info("[%s] 文档下载请求：%s", task_id, record)
+    try:
+        return await run_in_threadpool(download_document, record, get_minio_client, minio_config.bucket_name)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[%s] 文档下载失败", task_id)
+        raise HTTPException(status_code=503, detail="文档存储暂时不可用，请稍后重试") from exc
+
+
+@app.delete("/documents/{task_id}", summary="删除文档及对应知识数据")
+async def delete_document_file(task_id: uuid.UUID, user: CurrentUser) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+    try:
+        await run_in_threadpool(registry.delete_document, user.id, str(task_id), cleanup_document)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[%s] 文档删除未完成", task_id)
+        raise HTTPException(status_code=503, detail="文档删除未完成，记录已保留，请稍后重试") from exc
+    clear_task(str(task_id))
+    return {"task_id": str(task_id), "message": "文档及对应知识数据已删除"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

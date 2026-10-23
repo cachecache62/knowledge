@@ -1,162 +1,67 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
-import { currentUser } from '../state/auth.js'
-import { addDraft, documentStatus, filterDocuments, latestVersion, publishedVersion, publishVersion, readDocuments, versionLabels, writeDocuments } from '../utils/documents.js'
-
-// const documents = ref([])
-// const filters = reactive({ keyword: '', kind: '', status: '' })
-const filters = reactive({ keyword: '', status: '' })
-const appliedFilters = reactive({ ...filters })
-// const page = ref(1)
-// const pageSize = ref(10)
-// const expanded = ref(new Set())
-// const loadError = ref('')
-// const notice = ref('')
-// const noticeError = ref(false)
-// const dialog = ref(null)
-// const firstField = ref(null)
-// const modal = ref(null)
-// const modalError = ref('')
-// const editor = reactive({ title: '', question: '', answer: '', filename: '', note: '' })
+import { IMPORT_API_BASE, requestBlob, requestJson } from '../api.js'
 
 const documents = ref([])
 const total = ref(0)
 const loading = ref(false)
 const loadError = ref('')
-
+const filters = reactive({ keyword: '', status: '' })
+const appliedFilters = reactive({ keyword: '', status: '' })
 const page = ref(1)
 const pageSize = ref(10)
-
-
-const pageCount = computed(() =>
-  Math.max(1, Math.ceil(total.value / pageSize.value))
-)
-
-
-
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
+const hasFilters = computed(() => Boolean(appliedFilters.keyword || appliedFilters.status))
+const statusLabels = { pending: '待处理', processing: '处理中', completed: '已完成', failed: '失败' }
+const downloading = reactive(new Set())
+const deleteTarget = ref(null)
+const deleting = ref(false)
+const deleteError = ref('')
+const deleteDialog = ref(null)
+const cancelDeleteButton = ref(null)
+const notice = ref('')
+const noticeError = ref(false)
 let noticeTimer
-
-
-const statusCodes = { draft: 'DRAFT', published: 'PUBLISHED', archived: 'ARCHIVED', disabled: 'DISABLED' }
-const filtered = computed(() => filterDocuments(documents.value, appliedFilters).sort((a, b) => b.id - a.id))
-// const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
-// const visibleDocuments = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
-
-// 后端已经分页，这里直接展示接口返回的当前页数据。
-const visibleDocuments = computed(() => documents.value)
-
-const statusLabels = {
-  pending: '待处理',
-  processing: '处理中',
-  completed: '已完成',
-  failed: '失败',
-}
-
-// 你之前注释了这个函数，需要恢复。
-function formatDate(value) {
-  if (!value) return '—'
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
-
-  return date.toLocaleString('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  })
-}
-
-const hasFilters = computed(() => Object.values(appliedFilters).some(Boolean))
-const modalDocument = computed(() => documents.value.find(document => document.id === modal.value?.documentId))
-const editingFaq = computed(() => modal.value?.type === 'faq' || modalDocument.value?.kind === 'faq')
-const modalTitle = computed(() => {
-  if (modal.value?.type === 'faq') return '新增 FAQ'
-  if (modal.value?.type === 'editor') return modal.value.versionNumber ? '编辑草稿' : '新建版本'
-  if (modal.value?.type === 'preview') return '版本详情'
-  return modal.value?.action === 'delete' ? '删除文档' : modal.value?.action === 'publish' ? '发布版本' : '回滚版本'
-})
-const previewVersion = computed(() => modalDocument.value?.versions.find(version => version.number === modal.value?.versionNumber))
-
-watch([pageCount, pageSize], () => { page.value = Math.min(page.value, pageCount.value) })
+let activeRequest
+let active = true
+const downloadRequests = new Map()
+const downloadUrls = new Set()
 
 function notify(message, error = false) {
   clearTimeout(noticeTimer)
   notice.value = message
   noticeError.value = error
-  noticeTimer = setTimeout(() => { notice.value = '' }, 5000)
+  noticeTimer = setTimeout(() => { notice.value = '' }, 6000)
 }
 
-function loadList1(showNotice = false) {
-  try {
-    documents.value = readDocuments(currentUser.value.id)
-    loadError.value = ''
-    if (showNotice) notify('已刷新本地预览记录。')
-  } catch {
-    loadError.value = '无法读取本地预览记录，请检查浏览器存储权限或重新加载。'
-  }
-}
-
-// 读取真实数据
-// import {
-//   computed,
-//   onActivated,
-//   onBeforeUnmount,
-//   onDeactivated,
-//   reactive,
-//   ref,
-// } from 'vue'
-// import { IMPORT_API_BASE, requestJson } from '../api.js'
-
-
-
-import {
-  // computed,
-  onActivated,
-  // onBeforeUnmount,
-  // onDeactivated,
-  // reactive,
-  // ref,
-} from 'vue'
-import { IMPORT_API_BASE, requestJson } from '../api.js'
-
-
-let activeRequest
-
-async function loadList() {
+async function loadList(showNotice = false) {
   activeRequest?.abort()
-
   const controller = new AbortController()
   activeRequest = controller
   loading.value = true
   loadError.value = ''
-
   const params = new URLSearchParams({
-    page: String(page.value),
-    page_size: String(pageSize.value),
-    keyword: filters.keyword.trim(),
+    page: String(page.value), page_size: String(pageSize.value), keyword: appliedFilters.keyword,
   })
-
-  if (filters.status) params.set('status', filters.status)
-
+  if (appliedFilters.status) params.set('status', appliedFilters.status)
   try {
-    const data = await requestJson(
-      IMPORT_API_BASE,
-      `/documents?${params}`,
-      { signal: controller.signal }
-    )
-
-    if (activeRequest !== controller) return
-
-    documents.value = data.items
+    const data = await requestJson(IMPORT_API_BASE, '/documents?' + params, {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
+    })
+    if (activeRequest !== controller || controller.signal.aborted) return
+    if (!Array.isArray(data.items) || !Number.isInteger(data.total)) throw new Error('服务端返回的文档列表格式不正确')
     total.value = data.total
+    if (page.value > pageCount.value) {
+      page.value = pageCount.value
+      await loadList(showNotice)
+      return
+    }
+    documents.value = data.items
+    if (showNotice) notify('文档列表已刷新。')
   } catch (error) {
     if (activeRequest === controller && !controller.signal.aborted) {
-      loadError.value = `加载文档失败：${error.message}`
+      loadError.value = '加载文档失败：' + error.message
     }
   } finally {
     if (activeRequest === controller) loading.value = false
@@ -164,17 +69,18 @@ async function loadList() {
 }
 
 function applyFilters() {
+  Object.assign(appliedFilters, { keyword: filters.keyword.trim(), status: filters.status })
   page.value = 1
   loadList()
 }
 
 function resetFilters() {
-  filters.keyword = ''
-  filters.status = ''
+  Object.assign(filters, { keyword: '', status: '' })
   applyFilters()
 }
 
 function changePage(value) {
+  if (value < 1 || value > pageCount.value || value === page.value) return
   page.value = value
   loadList()
 }
@@ -184,141 +90,251 @@ function changePageSize() {
   loadList()
 }
 
-// 页面被 KeepAlive 缓存，返回管理页时重新获取真实数据。
-onActivated(loadList)
-onDeactivated(() => activeRequest?.abort())
-onBeforeUnmount(() => activeRequest?.abort())
+function formatDate(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  })
+}
 
+function isImporting(item) {
+  return ['pending', 'processing'].includes(item.status)
+}
 
+// 下载文档文件第一版 直接使用 requestBlob 下载，避免浏览器对大文件的内存占用过高
+async function downloadDocument1(item) {
+  if (downloading.has(item.task_id) || deleting.value && deleteTarget.value?.task_id === item.task_id) return
+  const controller = new AbortController()
+  downloadRequests.set(item.task_id, controller)
+  downloading.add(item.task_id)
+  try {
+    const blob = await requestBlob(IMPORT_API_BASE, '/documents/' + encodeURIComponent(item.task_id) + '/download', {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]),
+    })
+    if (controller.signal.aborted) return
+    const url = URL.createObjectURL(blob)
+    downloadUrls.add(url)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = item.filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.delete(url) }, 1000)
+    notify('文件已准备好，请在浏览器中确认保存：' + item.filename)
+  } catch (error) {
+    if (!controller.signal.aborted) notify('下载失败：' + error.message, true)
+  } finally {
+    downloading.delete(item.task_id)
+    downloadRequests.delete(item.task_id)
+  }
+}
 
+async function downloadDocument(item) {
+  if (
+    downloadRequests.has(item.task_id) ||
+    downloading.has(item.task_id) ||
+    (deleting.value && deleteTarget.value?.task_id === item.task_id)
+  ) return
+
+  if (typeof window.showSaveFilePicker !== 'function') {
+    notify('当前浏览器不支持先选择保存位置，请使用支持此功能的 Chrome 或 Edge。', true)
+    return
+  }
+
+  const controller = new AbortController()
+  downloadRequests.set(item.task_id, controller)
+
+  let writable
+
+  try {
+    // ① 先选择保存位置，此时还没有向后端请求文件。
+    const fileHandle = await window.showSaveFilePicker({
+      suggestedName: item.filename,
+    })
+
+    // 用户点击“保存”后，才执行到这里。
+    if (controller.signal.aborted) return
+
+    downloading.add(item.task_id)
+
+    // ② 向后端请求文件。
+    const blob = await requestBlob(
+      IMPORT_API_BASE,
+      '/documents/' + encodeURIComponent(item.task_id) + '/download',
+      {
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(60000),
+        ]),
+      }
+    )
+
+    if (controller.signal.aborted) return
+
+    // ③ 将文件写入用户选择的位置。
+    writable = await fileHandle.createWritable()
+    await writable.write(blob)
+    await writable.close()
+    writable = null
+
+    notify('文件已保存：' + item.filename)
+  } catch (error) {
+    // 写入失败时放弃尚未提交的写入。
+    if (writable) {
+      try {
+        await writable.abort()
+      } catch {
+        // 保留原始错误。
+      }
+    }
+
+    // 用户取消保存窗口，正常结束，不提示下载失败。
+    if (error.name === 'AbortError' || controller.signal.aborted) return
+
+    notify('下载或保存失败：' + error.message, true)
+  } finally {
+    downloading.delete(item.task_id)
+    downloadRequests.delete(item.task_id)
+  }
+}
+
+async function askDelete(item) {
+  if (isImporting(item) || deleting.value) return
+  deleteTarget.value = item
+  deleteError.value = ''
+  await nextTick()
+  deleteDialog.value.showModal()
+  cancelDeleteButton.value?.focus()
+}
+
+function closeDelete() {
+  if (deleting.value) return
+  deleteDialog.value?.close()
+  deleteTarget.value = null
+  deleteError.value = ''
+}
+
+async function confirmDelete() {
+  if (!deleteTarget.value || deleting.value) return
+  deleting.value = true
+  deleteError.value = ''
+  try {
+    await requestJson(IMPORT_API_BASE, '/documents/' + encodeURIComponent(deleteTarget.value.task_id), {
+      method: 'DELETE', signal: AbortSignal.timeout(120000),
+    })
+    deleting.value = false
+    closeDelete()
+    notify('文档及对应知识数据已删除。')
+    if (active) await loadList()
+  } catch (error) {
+    if (error.status === 404) {
+      deleting.value = false
+      closeDelete()
+      notify('文档已不存在，列表已更新。')
+      if (active) await loadList()
+    } else {
+      deleteError.value = error.name === 'TimeoutError'
+        ? '删除结果尚未确认，请稍后刷新列表查看。'
+        : '删除失败：' + error.message
+    }
+  } finally {
+    deleting.value = false
+  }
+}
+
+function cancelReads() {
+  activeRequest?.abort()
+  for (const controller of downloadRequests.values()) controller.abort()
+}
+
+onActivated(() => { active = true; loadList() })
+onDeactivated(() => {
+  active = false
+  cancelReads()
+  if (!deleting.value) closeDelete()
+  else deleteDialog.value?.close()
+})
+onBeforeUnmount(() => {
+  active = false
+  cancelReads()
+  clearTimeout(noticeTimer)
+  for (const url of downloadUrls) URL.revokeObjectURL(url)
+  deleteDialog.value?.close()
+})
 </script>
 
 <template>
   <main class="documents-page">
-    <div class="documents-topline"><span>管理知识内容，让每一次回答都有据可依。</span><button class="document-button" @click="loadList(true)"><AppIcon name="refresh" :size="15" />刷新列表</button></div>
+    <div class="documents-topline">
+      <span>管理知识内容，让每一次回答都有据可依。</span>
+      <button class="document-button" :disabled="loading" @click="loadList(true)">
+        <AppIcon name="refresh" :size="15" />{{ loading ? '刷新中…' : '刷新列表' }}
+      </button>
+    </div>
 
     <section class="documents-panel" aria-labelledby="documents-title">
       <header class="documents-heading">
-        <div><div class="documents-title-line"><h1 id="documents-title">知识文档与版本</h1><span class="documents-preview-label">本地预览</span></div><p>统一管理上传文档与 FAQ。通过新建版本更新内容，保留历史记录，随时查看与回滚。</p></div>
-        <div class="documents-heading-actions"><button class="document-button" @click="openEditor()"><AppIcon name="plus" :size="16" />新增 FAQ</button><RouterLink to="/import" class="document-button primary"><AppIcon name="upload" :size="16" />上传文档</RouterLink></div>
+        <div>
+          <div class="documents-title-line"><h1 id="documents-title">知识库文档管理</h1></div>
+          <p>查看文档导入状态，下载原始文件，或删除不再需要的文档及对应知识数据。</p>
+        </div>
+        <RouterLink to="/import" class="document-button primary"><AppIcon name="upload" :size="16" />上传文档</RouterLink>
       </header>
 
       <div class="documents-body">
-        <div class="documents-preview-note"><AppIcon name="info" :size="16" /><span>示例数据与管理操作仅保存在当前浏览器，不影响实际知识库；上传文档进入现有导入流程。</span></div>
         <form class="documents-filters" @submit.prevent="applyFilters">
-          <label class="document-search"><AppIcon name="search" :size="17" /><input v-model="filters.keyword" aria-label="搜索文档标题、ID或状态" placeholder="搜索文档标题 / ID / 状态" /></label>
-          <select v-model="filters.kind" aria-label="文档类型"><option value="">全部类型</option><option value="document">上传文档</option><option value="faq">FAQ</option></select>
-          <select v-model="filters.status" aria-label="文档状态"><option value="">全部状态</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option><option value="disabled">已停用</option></select>
-          <button type="submit" class="document-button primary">查询</button><button type="button" class="document-button" @click="resetFilters">重置</button>
+          <label class="document-search"><AppIcon name="search" :size="17" /><input v-model="filters.keyword" aria-label="搜索文档标题或任务ID" placeholder="搜索文档标题 / 任务 ID" /></label>
+          <select v-model="filters.status" aria-label="文档状态">
+            <option value="">全部状态</option><option value="pending">待处理</option><option value="processing">处理中</option><option value="completed">已完成</option><option value="failed">失败</option>
+          </select>
+          <button type="submit" class="document-button primary" :disabled="loading">查询</button>
+          <button type="button" class="document-button" @click="resetFilters">重置</button>
         </form>
 
-        <div class="documents-list-heading"><span>全部文档 <strong>{{ documents.length }}</strong></span><span>{{ hasFilters ? `筛选结果 ${filtered.length} 条` : '点击文档左侧箭头，查看版本历史' }}</span></div>
+        <div class="documents-list-heading"><span>{{ hasFilters ? '筛选结果' : '全部文档' }} <strong>{{ total }}</strong></span><span>仅展示当前账号上传的文档</span></div>
         <div v-if="loadError" class="documents-load-error" role="alert"><AppIcon name="info" :size="18" /><span>{{ loadError }}</span><button class="document-link" @click="loadList()">重新加载</button></div>
-        <div class="documents-table-scroll" role="region" aria-label="知识库文档列表" tabindex="0">
+        <div class="documents-table-scroll" role="region" aria-label="知识库文档列表" :aria-busy="loading" tabindex="0">
           <table class="documents-table">
-            <thead>
-  <tr>
-    <th scope="col">任务 ID</th>
-    <th scope="col" class="document-title-cell">文档标题</th>
-    <th scope="col">适用范围</th>
-    <th scope="col">导入状态</th>
-    <th scope="col">创建时间（北京）</th>
-    <th scope="col">更新时间（北京）</th>
-  </tr>
-</thead>
-
-<tbody>
-  <tr
-    v-for="document in visibleDocuments"
-    :key="document.task_id"
-  >
-    <td
-      class="document-id-cell"
-      :title="document.task_id"
-    >
-      {{ document.task_id.slice(0, 8) }}
-    </td>
-
-    <td>
-      <div class="document-name" :title="document.filename">
-        <span class="document-file-icon">
-          <AppIcon name="file" :size="18" />
-        </span>
-
-        <span>
-          <strong>{{ document.filename }}</strong>
-          <small>
-            文档 ·
-            {{ (document.filename.split('.').pop() || '').toUpperCase() }}
-          </small>
-        </span>
-      </div>
-    </td>
-
-    <td>
-      <span class="document-scope">
-        {{ document.scope === 'shared_kb' ? '共享知识库' : document.scope }}
-      </span>
-    </td>
-
-    <td>
-      <span
-        class="document-status"
-        :class="document.status"
-      >
-        <i></i>
-        {{ statusLabels[document.status] || document.status }}
-      </span>
-    </td>
-
-    <td class="document-date">
-      {{ formatDate(document.created_at) }}
-    </td>
-
-    <td class="document-date">
-      {{ formatDate(document.updated_at) }}
-    </td>
-  </tr>
-
-  <tr v-if="!visibleDocuments.length">
-    <td colspan="6">
-      <div class="documents-empty">
-        <AppIcon name="file" :size="30" />
-
-        <strong>
-          {{
-            loading
-              ? '正在加载文档…'
-              : loadError
-                ? '文档加载失败'
-                : '暂无符合条件的文档'
-          }}
-        </strong>
-      </div>
-    </td>
-  </tr>
-</tbody>
+            <thead><tr><th scope="col">任务 ID</th><th scope="col" class="document-title-cell">文档标题</th><th scope="col">适用范围</th><th scope="col">导入状态</th><th scope="col">创建时间（北京）</th><th scope="col">更新时间（北京）</th><th scope="col" class="document-actions-cell">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in documents" :key="item.task_id">
+                <td class="document-id-cell" :title="item.task_id">{{ item.task_id.slice(0, 8) }}</td>
+                <td><div class="document-name" :title="item.filename"><span class="document-file-icon"><AppIcon name="file" :size="18" /></span><span><strong>{{ item.filename }}</strong><small>文档 · {{ (item.filename.split('.').pop() || '').toUpperCase() }}</small></span></div></td>
+                <td><span class="document-scope">{{ item.scope === 'shared_kb' ? '共享知识库' : item.scope }}</span></td>
+                <td><span class="document-status" :class="item.status"><i></i>{{ statusLabels[item.status] || item.status }}</span></td>
+                <td class="document-date">{{ formatDate(item.created_at) }}</td>
+                <td class="document-date">{{ formatDate(item.updated_at) }}</td>
+                <td><div class="document-row-actions">
+                  <button class="document-link document-action-button" :disabled="downloading.has(item.task_id) || deleting && deleteTarget?.task_id === item.task_id" :aria-label="'下载 ' + item.filename" @click="downloadDocument(item)"><AppIcon name="download" :size="14" />{{ downloading.has(item.task_id) ? '下载中…' : '下载' }}</button>
+                  <button class="document-link danger document-action-button" :disabled="isImporting(item) || deleting || downloading.has(item.task_id)" :title="isImporting(item) ? '文档导入完成或失败后才能删除' : '删除原文件及对应知识数据'" :aria-label="'删除 ' + item.filename" @click="askDelete(item)"><AppIcon name="trash" :size="14" />删除</button>
+                </div></td>
+              </tr>
+              <tr v-if="!documents.length"><td colspan="7"><div class="documents-empty"><AppIcon name="file" :size="30" /><strong>{{ loading ? '正在加载文档…' : loadError ? '文档加载失败' : hasFilters ? '没有找到符合条件的文档' : '暂无文档' }}</strong><p v-if="!loading && !loadError">{{ hasFilters ? '试试其他关键词，或清空筛选条件。' : '上传一份 PDF 或 Markdown 文档，开始建立知识库。' }}</p><button v-if="hasFilters && !loading" class="document-button" @click="resetFilters">清空筛选</button></div></td></tr>
+            </tbody>
           </table>
         </div>
-
-        <footer class="documents-pagination"><span>共 {{ filtered.length }} 条{{ filtered.length ? `，显示 ${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, filtered.length)} 条` : '' }}</span><div><select v-model.number="pageSize" aria-label="每页条数" @change="page = 1"><option :value="5">5 条 / 页</option><option :value="10">10 条 / 页</option><option :value="20">20 条 / 页</option></select><button class="document-page-button" :disabled="page <= 1" aria-label="上一页" @click="page--"><AppIcon name="chevron" :size="15" class="previous" /></button><span class="document-page-current" aria-live="polite">{{ page }} / {{ pageCount }}</span><button class="document-page-button" :disabled="page >= pageCount" aria-label="下一页" @click="page++"><AppIcon name="chevron" :size="15" class="next" /></button></div></footer>
+        <footer class="documents-pagination">
+          <span>共 {{ total }} 条{{ total ? '，显示 ' + ((page - 1) * pageSize + 1) + '–' + Math.min(page * pageSize, total) + ' 条' : '' }}</span>
+          <div><select v-model.number="pageSize" aria-label="每页条数" @change="changePageSize"><option :value="5">5 条 / 页</option><option :value="10">10 条 / 页</option><option :value="20">20 条 / 页</option></select><button class="document-page-button" :disabled="page <= 1 || loading" aria-label="上一页" @click="changePage(page - 1)"><AppIcon name="chevron" :size="15" class="previous" /></button><span class="document-page-current" aria-live="polite">{{ page }} / {{ pageCount }}</span><button class="document-page-button" :disabled="page >= pageCount || loading" aria-label="下一页" @click="changePage(page + 1)"><AppIcon name="chevron" :size="15" class="next" /></button></div>
+        </footer>
       </div>
     </section>
-    <p class="documents-footer-note">内容有版本，知识可追溯。<span>当前展示示例数据，实际上传记录需后续接入文档列表接口。</span></p>
-
+    <p class="documents-footer-note">原文可下载，资料可管理。<span>导入中的文档暂不能删除。</span></p>
     <div v-if="notice" class="document-toast" :class="{ error: noticeError }" :role="noticeError ? 'alert' : 'status'"><AppIcon :name="noticeError ? 'info' : 'check'" :size="17" /><span>{{ notice }}</span><button class="icon-button" aria-label="关闭提示" @click="notice = ''"><AppIcon name="close" :size="15" /></button></div>
 
-    <dialog ref="dialog" class="document-dialog" aria-labelledby="document-dialog-title" @close="modal = null" @cancel="closeModal">
-      <template v-if="modal"><header><div><span class="document-dialog-eyebrow">资料库 · 本地预览</span><h2 id="document-dialog-title">{{ modalTitle }}<span v-if="modal.versionNumber"> V{{ modal.versionNumber }}</span></h2></div><button type="button" class="icon-button" aria-label="关闭弹窗" @click="closeModal"><AppIcon name="close" /></button></header>
-        <form v-if="modal.type === 'faq' || modal.type === 'editor'" class="document-editor" @submit.prevent="saveEditor">
-          <p class="document-dialog-description">{{ modal.type === 'faq' ? '整理一个常见问题，保存为草稿后可预览发布。' : `为「${modalDocument?.title}」${modal.versionNumber ? '编辑当前草稿' : '创建新版本，当前发布版本保持不变'}。` }}</p>
-          <template v-if="editingFaq"><label>文档标题 <span>*</span><input ref="firstField" v-model="editor.title" required maxlength="200" placeholder="例如：产品保修与售后服务" /></label><label>问题 <span>*</span><input v-model="editor.question" required maxlength="500" placeholder="输入用户可能提出的问题" /></label><label>回答 <span>*</span><textarea v-model="editor.answer" required maxlength="20000" rows="6" placeholder="输入完整、清晰的回答内容"></textarea></label></template>
-          <label v-else>版本文件名称 <span>*</span><input ref="firstField" v-model="editor.filename" required maxlength="254" placeholder="例如：设备用户手册-v2.pdf" /><small>本地预览仅记录文件名；实际文件请通过「上传文档」导入。</small></label>
-          <label>更新说明<textarea v-model="editor.note" rows="2" maxlength="500" placeholder="简要说明本次更新的内容"></textarea></label>
-          <p v-if="modalError" class="message-error" role="alert">{{ modalError }}</p><footer><button type="button" class="document-button" @click="closeModal">取消</button><button type="submit" class="document-button primary">保存草稿</button></footer>
-        </form>
-        <div v-else-if="modal.type === 'preview'" class="document-preview-content"><p class="document-dialog-description">{{ modalDocument?.title }}</p><dl><div><dt>版本状态</dt><dd>{{ versionLabels[previewVersion?.status] }}</dd></div><div><dt>创建时间</dt><dd>{{ formatDate(previewVersion?.createdAt) }}（北京时间）</dd></div><div><dt>更新说明</dt><dd>{{ previewVersion?.note || '—' }}</dd></div></dl><template v-if="modalDocument?.kind === 'faq'"><h3>{{ previewVersion?.question }}</h3><p class="document-faq-answer">{{ previewVersion?.answer }}</p></template><div v-else class="document-file-preview"><AppIcon name="file" :size="32" /><strong>{{ previewVersion?.filename }}</strong><span>此处为版本记录预览，未关联可下载的文档文件。</span></div><footer><button class="document-button" @click="closeModal">关闭</button></footer></div>
-        <div v-else class="document-confirm-content"><div class="document-confirm-icon" :class="{ danger: modal.action === 'delete' }"><AppIcon :name="modal.action === 'delete' ? 'trash' : 'history'" :size="24" /></div><p>确定{{ modal.action === 'delete' ? '删除' : modal.action === 'publish' ? '发布' : '回滚' }}「{{ modalDocument?.title }}」{{ modal.action === 'delete' ? '及其全部版本' : `的 V${modal.versionNumber} 版本` }}吗？</p><p class="document-dialog-description">{{ modal.action === 'delete' ? '只删除当前浏览器中的预览记录，不会删除服务器文件或向量数据。' : '只更新本地预览的发布状态，原发布版本将归档；不会更新实际检索索引。' }}</p><p v-if="modalError" class="message-error" role="alert">{{ modalError }}</p><footer><button ref="firstField" class="document-button" @click="closeModal">取消</button><button class="document-button" :class="modal.action === 'delete' ? 'danger-solid' : 'primary'" @click="confirmAction">{{ modal.action === 'delete' ? '删除本地记录' : modal.action === 'publish' ? '确认发布' : '确认回滚' }}</button></footer></div>
+    <dialog ref="deleteDialog" class="document-dialog" aria-labelledby="delete-document-title" aria-describedby="delete-document-description" @cancel.prevent="closeDelete">
+      <template v-if="deleteTarget">
+        <header><div><span class="document-dialog-eyebrow">资料库 · 文档管理</span><h2 id="delete-document-title">删除文档</h2></div><button class="icon-button" :disabled="deleting" aria-label="关闭弹窗" @click="closeDelete"><AppIcon name="close" /></button></header>
+        <div class="document-confirm-content">
+          <div class="document-confirm-icon danger"><AppIcon name="trash" :size="24" /></div>
+          <p>确定删除「{{ deleteTarget.filename }}」吗？</p>
+          <p id="delete-document-description" class="document-dialog-description">将清理原文档、备份和对应知识切片，并将文档标记为已删除；数据库记录及上传者归属会保留。共享图片仍被其他文档使用时会保留。原文件清理后无法恢复；历史对话中的已有回答不会改变。</p>
+          <p v-if="deleteError" class="message-error" role="alert">{{ deleteError }}</p>
+          <footer><button ref="cancelDeleteButton" class="document-button" :disabled="deleting" @click="closeDelete">取消</button><button class="document-button danger-solid" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在删除…' : '确认删除文档' }}</button></footer>
+        </div>
       </template>
     </dialog>
   </main>
@@ -406,6 +422,11 @@ select { height: 38px; padding: 0 28px 0 10px; border: 1px solid #dce2eb; border
 .document-timezone { color: #a5adba; font-size: 9px; }
 .document-actions-cell { min-width: 174px; }
 .document-row-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.document-action-button { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
+.document-status.pending { color: #856124; background: #fff8e9; }
+.document-status.processing { color: #356fd1; background: #edf3fc; }
+.document-status.completed { color: #2f6f4e; background: #eef8f1; }
+.document-status.failed { color: #ad5151; background: #fdf0f0; }
 .document-link { padding: 3px 0; border: 0; background: transparent; font-size: 11px; color: var(--document-blue); }
 .document-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .document-link.warning { color: #8d682c; }

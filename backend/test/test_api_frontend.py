@@ -11,11 +11,14 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from api import frontend
 from auth.dependencies import get_current_user
 from auth.store import User, get_auth_store, utcnow
 from utils import sse_utils, task_utils
+from utils.import_registry import ImportRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,6 +53,14 @@ class ApiFrontendTests(unittest.TestCase):
             cls.import_api = importlib.import_module("api.import_service")
 
     def setUp(self) -> None:
+        # 上传登记也必须隔离，不能让协议测试写入开发环境的 MySQL。
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        self.addCleanup(engine.dispose)
+        registry = ImportRegistry(engine)
+        registry.create_schema()
+        registry_patch = patch.object(self.import_api, "get_import_registry", return_value=registry)
+        registry_patch.start()
+        self.addCleanup(registry_patch.stop)
         store = MagicMock()
         store.chat_id.side_effect = lambda user_id, client_id, **kwargs: client_id
         store.owns_import.return_value = True

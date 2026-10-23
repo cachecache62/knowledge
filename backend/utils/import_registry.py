@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
+from pathlib import Path
+
+from fastapi import HTTPException
 
 from sqlalchemy import (
     Column,
+    Boolean,
     DateTime,
     MetaData,
     String,
@@ -11,11 +15,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     insert,
+    inspect,
+    text,
     select,
     update,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from auth.store import get_auth_store
 
@@ -46,9 +52,13 @@ documents = Table(
     Column("file_hash", String(64), nullable=False),
     Column("active_hash", String(64), nullable=True),
     Column("status", String(16), nullable=False),
+    Column("is_deleted", Boolean, nullable=False, default=False, server_default=text("0")),
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     Column("error", Text, nullable=False),
+    Column("storage_path", String(1024), nullable=True),
+    Column("object_key", String(1024), nullable=True),
+    Column("vector_key", String(36), nullable=True),
     UniqueConstraint(
         "scope",
         "active_hash",
@@ -70,6 +80,86 @@ class ImportRegistry:
 
     def create_schema(self) -> None:
         metadata.create_all(self.engine)
+        # create_all 不会补齐旧表；删除标记默认 0，保留已有文档为正常状态。
+        existing = {column["name"] for column in inspect(self.engine).get_columns(documents.name)}
+        definitions = (
+            ("storage_path", "VARCHAR(1024) NULL"),
+            ("object_key", "VARCHAR(1024) NULL"),
+            ("vector_key", "VARCHAR(36) NULL"),
+            ("is_deleted", "BOOLEAN NOT NULL DEFAULT 0"),
+        )
+        for name, definition in definitions:
+            if name not in existing:
+                try:
+                    with self.engine.begin() as connection:
+                        connection.execute(text(f"ALTER TABLE kb_import_documents ADD COLUMN {name} {definition}"))
+                except SQLAlchemyError:
+                    # 首次请求可能并发触发初始化；只忽略另一连接已经添加此字段的情形。
+                    if name not in {column["name"] for column in inspect(self.engine).get_columns(documents.name)}:
+                        raise
+
+    def remember_storage(self, task_id: str, storage_path: str, object_key: str | None = None) -> None:
+        values: dict[str, Any] = {"storage_path": storage_path}
+        if object_key is not None:
+            values["object_key"] = object_key
+        with self.engine.begin() as connection:
+            connection.execute(update(documents).where(
+                documents.c.task_id == task_id, documents.c.scope == self.scope,
+                documents.c.is_deleted.is_(False),
+            ).values(**values))
+
+    def get_document(self, user_id: int, task_id: str) -> dict[str, Any]:
+        """
+        获取文档记录，返回示例：·
+        {
+        "task_id": "...",
+        "filename": "手册.pdf",
+        "storage_path": "20261023/任务ID/手册.pdf",
+        "status": "completed",
+        # 其他文档字段……
+    }
+        """
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(documents).join(import_tasks, documents.c.task_id == import_tasks.c.task_id)
+                .where(documents.c.scope == self.scope, documents.c.task_id == task_id,
+                       documents.c.is_deleted.is_(False),
+                       import_tasks.c.user_id == user_id)
+            ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="未找到此文档")
+        return dict(row)
+
+    def delete_document(
+        self, user_id: int, task_id: str,
+        cleanup: Callable[[dict[str, Any], bool], None],
+    ) -> None:
+        # 在清理期间锁住记录，避免重复删除；外部清理失败时保留登记和去重占位，允许重试。
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(documents).join(import_tasks, documents.c.task_id == import_tasks.c.task_id)
+                .where(documents.c.scope == self.scope, documents.c.task_id == task_id,
+                       documents.c.is_deleted.is_(False),
+                       import_tasks.c.user_id == user_id).with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="未找到此文档")
+            if row["status"] in {"pending", "processing"}:
+                raise HTTPException(status_code=409, detail="文档正在导入，请等待处理结束后再删除")
+            others = connection.execute(
+                select(documents.c.filename).where(
+                    documents.c.task_id != task_id, documents.c.is_deleted.is_(False),
+                )
+            ).scalars().all()
+            stem = Path(row["filename"]).stem
+            if not row["vector_key"] and any(Path(name).stem == stem for name in others):
+                raise HTTPException(status_code=409, detail="旧文档存在同名记录，无法安全确认向量归属，暂不能删除")
+            delete_images = not any(Path(name).stem.replace(" ", "") == stem.replace(" ", "") for name in others)
+            cleanup(dict(row), delete_images)
+            # 保留文档原始记录和上传者归属，只标记删除并释放文件指纹占位。
+            connection.execute(update(documents).where(documents.c.task_id == task_id).values(
+                is_deleted=True, active_hash=None, updated_at=beijing_now(),
+            ))
 
     def claim(
         self,
@@ -88,9 +178,11 @@ class ImportRegistry:
             "file_hash": file_hash,
             "active_hash": file_hash,
             "status": "pending",
+            "is_deleted": False,
             "created_at": now,
             "updated_at": now,
             "error": "",
+            "vector_key": task_id,
         }
 
         for attempt in range(2):
@@ -108,6 +200,7 @@ class ImportRegistry:
                             select(documents).where(
                                 documents.c.scope == self.scope,
                                 documents.c.active_hash == file_hash,
+                                documents.c.is_deleted.is_(False),
                             )
                         )
                         .mappings()
@@ -149,6 +242,7 @@ class ImportRegistry:
                 .where(
                     documents.c.scope == self.scope,
                     documents.c.task_id == task_id,
+                    documents.c.is_deleted.is_(False),
                 )
                 .values(**values)
             )
@@ -169,6 +263,7 @@ class ImportRegistry:
 
         conditions = [
             documents.c.scope == self.scope,
+            documents.c.is_deleted.is_(False),
             import_tasks.c.user_id == user_id,
         ]
 

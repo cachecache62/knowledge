@@ -22,3 +22,17 @@ export async function requestJson(base, path, options = {}) {
   }
   return data
 }
+
+// 下载使用 Blob，错误响应仍按 API 的 JSON detail 展示，并沿用 Cookie 鉴权。
+export async function requestBlob(base, path, options = {}) {
+  const response = await fetch(`${base}${path}`, { ...options, credentials: 'include' })
+  if (response.status === 401) window.dispatchEvent(new Event('kb:unauthorized'))
+  if (!response.ok) {
+    let data
+    try { data = await response.json() } catch { /* 非 JSON 错误使用 HTTP 状态。 */ }
+    const error = new Error(typeof data?.detail === 'string' ? data.detail : `下载失败（HTTP ${response.status}）`)
+    error.status = response.status
+    throw error
+  }
+  return response.blob()
+}

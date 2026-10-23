@@ -44,6 +44,9 @@ class NodeImportMilvus(BaseNode):
 
         # 步骤1：输入数据有效性校验
         chunks_json_data, vector_dimension = self._step_1_check_input(state)
+        if state.get("task_id"):
+            for chunk in chunks_json_data:
+                chunk["source_task_id"] = state["task_id"]
 
         # 步骤2：Milvus客户端连接+集合准备（自动建表）
         client = self._step_2_prepare_collection(vector_dimension)
@@ -184,7 +187,14 @@ class NodeImportMilvus(BaseNode):
         file_title = chunks_json_data[0].get("file_title")
 
         # 2. 执行幂等清理
-        self._clear_chunks_by_file_title(client, file_title)
+        task_id = chunks_json_data[0].get("source_task_id")
+        if task_id:
+            client.delete(
+                collection_name=milvus_config.chunks_collection,
+                filter=f"source_task_id == '{escape_milvus_string(task_id)}'",
+            )
+        else:
+            self._clear_chunks_by_file_title(client, file_title)
 
     def _clear_chunks_by_file_title(self, client, file_title):
 

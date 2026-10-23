@@ -289,14 +289,18 @@ class NodeItemNameRecognition(BaseNode):
                 self._create_item_name_collection(collection_name, milvus_client)
 
             # 3. 幂等性处理：删除同名商品数据，避免重复存储
-            file_title = escape_milvus_string(file_title)
-            milvus_client.delete(collection_name=collection_name, filter=f"file_title=='{file_title}'")
+            task_id = state.get("task_id")
+            expression = (f"source_task_id == '{escape_milvus_string(task_id)}'" if task_id
+                          else f"file_title == '{escape_milvus_string(file_title)}'")
+            milvus_client.delete(collection_name=collection_name, filter=expression)
 
             # 4. 数据插入：构造符合 Schema 的数据，非空向量才添加
             data = {
                 "file_title": file_title,
                 "item_name": item_name
             }
+            if task_id:
+                data["source_task_id"] = task_id
 
             if dense_vector is not None:
                 data["dense_vector"] = dense_vector
