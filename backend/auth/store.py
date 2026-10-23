@@ -37,6 +37,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def beijing_now() -> datetime:
+    # 北京时间（UTC+8）用于前端显示和日志记录，避免跨时区混乱。
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
+
 metadata = MetaData()
 users = Table(
     "kb_users",
@@ -54,7 +60,7 @@ users = Table(
     Column("created_at", DateTime, nullable=False),
     Column(
         "updated_at", DateTime, nullable=False,
-        default=utcnow, onupdate=utcnow, server_default=text("CURRENT_TIMESTAMP"),
+        default=beijing_now, onupdate=beijing_now, server_default=text("CURRENT_TIMESTAMP"),
     ),
     mysql_charset="utf8mb4",
     mysql_engine="InnoDB",
@@ -106,7 +112,9 @@ class User:
         return {
             "id": self.id,
             "email": self.email,
-            "created_at": self.created_at.isoformat() + "Z",
+            # "created_at": self.created_at.isoformat() + "Z",
+            "created_at": self.created_at.replace(tzinfo=BEIJING_TZ).isoformat()
+
         }
 
 
@@ -143,7 +151,7 @@ class AuthStore:
             password_hash: str, 
             password_plaintext: str | None = None
         ) -> User:
-        created_at = utcnow()
+        created_at = beijing_now()
         with self.engine.begin() as connection:
             result = connection.execute(
                 insert(users).values(
@@ -171,7 +179,7 @@ class AuthStore:
     ) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                delete(login_sessions).where(login_sessions.c.expires_at <= utcnow())
+                delete(login_sessions).where(login_sessions.c.expires_at <= beijing_now())
             )
             if previous_token:
                 connection.execute(
@@ -184,12 +192,12 @@ class AuthStore:
                     user_id=user_id,
                     token_hash=token_digest(token),
                     expires_at=expires_at,
-                    created_at=utcnow(),
+                    created_at=beijing_now(),
                 )
             )
 
     def authenticated_user(self, token: str) -> User | None:
-        now = utcnow()
+        now = beijing_now()
         session_start = now - timedelta(hours=get_auth_config().session_hours)
         statement = (
             select(users.c.id, users.c.email, users.c.created_at)
@@ -235,7 +243,7 @@ class AuthStore:
                         internal_id=internal_id,
                         user_id=user_id,
                         client_id=client_id,
-                        created_at=utcnow(),
+                        created_at=beijing_now(),
                     )
                 )
         except IntegrityError:
@@ -251,7 +259,7 @@ class AuthStore:
         with self.engine.begin() as connection:
             connection.execute(
                 insert(import_tasks).values(
-                    user_id=user_id, task_id=task_id, created_at=utcnow()
+                    user_id=user_id, task_id=task_id, created_at=beijing_now()
                 )
             )
 
@@ -277,6 +285,7 @@ def get_auth_store() -> AuthStore:
             pool_pre_ping=True,
             pool_recycle=1800,
             connect_args={
+                "init_command": "SET time_zone = '+08:00'",
                 "connect_timeout": 5,
                 "read_timeout": 10,
                 "write_timeout": 10,

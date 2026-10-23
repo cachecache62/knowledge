@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 
 from api.frontend import register_frontend
 from auth.dependencies import CurrentUser, Store, check_request_origin, configure_auth_support
-from auth.store import User, utcnow
+from auth.store import User, beijing_now
 from config.auth_config import get_auth_config
 
 app = FastAPI(title="掌柜智库-账户API")
@@ -49,7 +49,7 @@ def login_response(user: User, request: Request, response: Response, store: Stor
     config = get_auth_config()
     token = secrets.token_urlsafe(32)
     max_age = config.session_hours * 60 * 60
-    expires_at = utcnow() + timedelta(seconds=max_age)
+    expires_at = beijing_now() + timedelta(seconds=max_age)
     store.create_login(user.id, token, expires_at, request.cookies.get(config.cookie_name))
     response.set_cookie(
         config.cookie_name, token, max_age=max_age, httponly=True,

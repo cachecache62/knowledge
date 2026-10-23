@@ -5,6 +5,7 @@ import shutil
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 import requests
 
 from processor.import_processor.base import BaseNode, setup_logging
@@ -65,15 +66,12 @@ class NodePDFToMD(BaseNode):
         """
 
         # 1.下载zip
-        response = requests.get(zip_url)
-
-        if response.status_code != 200:
-            raise FileProcessingError("下载失败")
+        zip_content = self._download_result(zip_url)
 
         #定义做包的保存路径
         zip_save_path = output_dir_obj / f"{pdf_stem}_result.zip"
         with open(zip_save_path, "wb") as f:
-            f.write(response.content)
+            f.write(zip_content)
 
         self.log_step("ZIP下载", "下载成功")
 
@@ -99,6 +97,36 @@ class NodePDFToMD(BaseNode):
         target_md_file.rename(new_md_path)
 
         return str(new_md_path.absolute())
+
+    def _download_result(self, zip_url: str) -> bytes:
+        """只重试结果下载，避免瞬时 DNS 故障导致重新上传和解析 PDF。"""
+        host = urlsplit(zip_url).hostname or "MinerU"
+        for attempt in range(1, 4):
+            try:
+                response = requests.get(zip_url, timeout=(10, 120))
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == 3:
+                    detail = "请求超时" if isinstance(exc, requests.Timeout) else "连接或域名解析失败"
+                    raise FileProcessingError(
+                        f"MinerU 结果 ZIP 下载失败：{host} {detail}，已尝试 3 次。"
+                        "请检查运行后端的机器的网络、DNS 和代理配置后重试。",
+                        cause=exc,
+                    ) from exc
+            else:
+                try:
+                    if response.status_code == 200:
+                        return response.content
+                    retryable = response.status_code == 429 or 500 <= response.status_code < 600
+                    if not retryable or attempt == 3:
+                        raise FileProcessingError(
+                            f"MinerU 结果 ZIP 下载失败：{host} 返回 HTTP {response.status_code}"
+                        )
+                finally:
+                    response.close()
+            self.logger.warning("MinerU 结果下载失败，将重试：host=%s，attempt=%s/3", host, attempt)
+            time.sleep(attempt * 2)
+        raise FileProcessingError("MinerU 结果 ZIP 下载失败")
+
     def _step_2_upload_and_poll(self, pdf_path_obj: Path):
         """
         步骤2：上传PDF至MinerU并轮询解析任务状态

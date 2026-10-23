@@ -72,7 +72,7 @@ async function copyMessage(message) {
 
 function formatTime(timestamp) {
   const date = new Date(Number(timestamp) * 1000)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })
 }
 
 async function scrollToBottom() {

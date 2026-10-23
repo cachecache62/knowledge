@@ -56,7 +56,28 @@
 
 MySQL 表为 `kb_users`（用户）、`kb_login_sessions`（登录会话）、`kb_chat_sessions`（用户对话映射）、`kb_import_tasks`（任务归属）。问答、历史读取和清空、SSE、上传与任务查询均校验登录身份。健康检查及前端静态文件公开，以便展示登录页。直接调用业务 API 的客户端也要先登录并携带 Cookie。
 
-`kb_users.updated_at` 记录用户信息的更新时间，项目写入时使用 UTC。注册时与 `created_at` 相同，通过 SQLAlchemy 更新用户资料时自动更新；单纯登录不会改变它。运行初始化命令或新进程首次连接时会给旧表补齐该字段，已有用户先按创建时间回填。重复初始化保留已有的更新时间。直接执行原生 SQL 修改用户时，需要同时设置 `updated_at`。
+`kb_users.updated_at` 记录用户信息的更新时间，项目写入时使用 UTC。注册时与 `created_at` 相同，通过 SQLAlchemy 更新用户资料时自动更新；单纯登录不会改变它。运行初始化命令或新进程首次连接时会给旧表补齐该字段，已有用户先按创建时间回填。重复初始化保留已有的更新时间。直接执行原生 SQL 修改用户时，需要同时设置 UTC 的 `updated_at`。
+
+### UTC 存储与北京时间显示
+
+所有 MySQL 时间字段（包括登录的 `expires_at` 和导入登记表 `kb_import_documents`）继续保存 UTC，数据库中看到的值比北京时间少 8 小时是预期行为。应用连接及初始化连接设置会话时区为 `+00:00`，使 `CURRENT_TIMESTAMP` 默认值也使用 UTC。原有 UTC 数据无需迁移，不要对历史记录执行加 8 小时的 `UPDATE`。
+
+数据库客户端需要查看北京时间时，只在查询结果中转换，原始值保持不变：
+
+```sql
+SELECT id, email,
+       CONVERT_TZ(created_at, '+00:00', '+08:00') AS created_at_beijing,
+       CONVERT_TZ(updated_at, '+00:00', '+08:00') AS updated_at_beijing
+FROM kb_users
+ORDER BY id DESC
+LIMIT 5;
+```
+
+这里使用固定时差，不依赖 MySQL 命名时区表。`DATETIME` 列不会因为修改客户端的 `time_zone` 而自动转换显示，查询时应显式转换。
+
+账户 API 的 `created_at` 继续返回带 `Z` 的 UTC 时间，登录有效期计算保持不变。聊天消息时间显示显式指定 `Asia/Shanghai`，即使浏览器使用其他时区也显示北京时间。以后新增日期展示时，同样使用显式时区，例如 `new Date(user.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })`；不要去掉 `Z` 或先加 8 小时再交给浏览器转换，以免重复转换。
+
+更新代码后重启账户、导入和问答三个服务，使连接池的 UTC 会话配置生效。
 
 相同浏览器会话 ID 在不同账号下映射到不同内部 ID，防止读取或清空他人历史。导入进度仅任务所属账号可见。对话正文仍保存在 MongoDB；文档和向量仍属于原有的共享知识库，本次没有改成每用户私有文档检索。
 

@@ -11,6 +11,7 @@ from processor.import_processor.exceptions import StateFieldError, MilvusError
 from processor.import_processor.state import ImportGraphState
 from utils.milvus_utils import get_milvus_client, escape_milvus_string
 
+from datetime import datetime
 
 class NodeImportMilvus(BaseNode):
     """
@@ -141,7 +142,8 @@ class NodeImportMilvus(BaseNode):
         schema.add_field(field_name="item_name", datatype=DataType.VARCHAR, max_length=100)  # 商品名称（幂等性依据）
         schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)  # 稀疏向量
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=vector_dimension)  # 稠密向量
-
+        schema.add_field(field_name="create_time", datatype=DataType.VARCHAR, max_length=19) # 创建时间
+        schema.add_field(field_name="update_time", datatype=DataType.VARCHAR, max_length=19) # 更新时间
         # 3. 创建索引
         index_params = milvus_client.prepare_index_params()
         # 稠密向量索引：AUTOINDEX自动选最优索引类型+余弦相似度（语义检索常用）
@@ -220,6 +222,12 @@ class NodeImportMilvus(BaseNode):
 
         # 2. 批量插入数据
         try:
+            now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            for chunk in chunks_json_data:
+                chunk["create_time"] = now_time
+                chunk["update_time"] = now_time
+
             result = client.insert(
                 collection_name=milvus_config.chunks_collection,
                 data=chunks_json_data

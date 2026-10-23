@@ -15,7 +15,10 @@ def main() -> None:
             connection.execute(text(f"CREATE DATABASE IF NOT EXISTS `{config.mysql_database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"))
     finally:
         server.dispose()
-    engine = create_engine(config.database_url(), connect_args={"connect_timeout": 5})
+    engine = create_engine(config.database_url(), connect_args={
+        "connect_timeout": 5,
+        "init_command": "SET time_zone = '+08:00'",
+    })
     try:
         AuthStore(engine).create_schema()
     finally:
