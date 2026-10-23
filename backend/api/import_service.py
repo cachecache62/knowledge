@@ -36,6 +36,10 @@ from utils.task_utils import (
     update_task_status,
 )
 
+
+from typing import Literal
+from fastapi import Query
+
 app = FastAPI(title="掌柜智库-导入API", description="Vue 前端的文件导入及进度接口")
 configure_auth_support(app)
 register_frontend(app, "import")
@@ -339,6 +343,27 @@ async def get_task_progress(
 async def health() -> dict[str, bool]:
     return {"ok": True}
 
+
+@app.get("/documents", summary="查询当前用户上传的文档")
+async def list_documents(
+    user: CurrentUser,
+    keyword: str = Query("", max_length=200),
+    status: Literal[
+        "pending", "processing", "completed", "failed"
+    ] | None = None,
+    page: int = Query(1, ge=1, le=100000),
+    page_size: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+
+    return await run_in_threadpool(
+        registry.list_documents,
+        user.id,
+        keyword.strip(),
+        status,
+        page,
+        page_size,
+    )
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

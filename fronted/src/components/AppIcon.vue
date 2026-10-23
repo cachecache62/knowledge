@@ -18,6 +18,9 @@ const paths = {
   upload: 'M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5',
   arrowRight: 'M4 12h16m-6-6 6 6-6 6',
   logout: 'M9 4H4v16h5M9 12h12m-5-5 5 5-5 5',
+  refresh: 'M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17',
+  info: 'M12 11v6M12 7h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',
+  history: 'M3 3v6h6M3.5 9a9 9 0 1 1-.1 6M12 7v5l3 2',
 }
 </script>
 

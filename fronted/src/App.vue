@@ -10,13 +10,14 @@ const route = useRoute()
 const router = useRouter()
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(false)
+const libraryOpen = ref(['/documents', '/import'].includes(route.path))
 const searchOpen = ref(false)
 const search = ref('')
 const searchInput = ref(null)
 const loggingOut = ref(false)
 const logoutError = ref('')
 const filteredConversations = computed(() => conversations.value.filter(item => item.title.toLowerCase().includes(search.value.trim().toLowerCase())))
-const pageTitle = computed(() => ({ '/import': '资料库', '/login': '账号中心', '/register': '账号中心' })[route.path] || '掌柜智库')
+const pageTitle = computed(() => ({ '/documents': '资料库', '/import': '资料库', '/login': '账号中心', '/register': '账号中心' })[route.path] || '掌柜智库')
 
 function startChat() {
   newConversation()
@@ -37,7 +38,10 @@ async function openSearch() {
   searchInput.value?.focus()
 }
 
-watch(() => route.path, () => { sidebarOpen.value = false })
+watch(() => route.path, (path) => {
+  sidebarOpen.value = false
+  if (['/documents', '/import'].includes(path)) libraryOpen.value = true
+})
 
 async function logout() {
   if (loggingOut.value) return
@@ -70,7 +74,13 @@ async function logout() {
       <nav class="primary-nav" aria-label="页面导航">
         <button class="nav-item" :disabled="conversationBusy" @click="startChat"><AppIcon name="edit" /><span>新对话</span><span class="nav-plus">+</span></button>
         <button class="nav-item" :class="{ selected: searchOpen }" :aria-expanded="searchOpen" @click="openSearch"><AppIcon name="search" /><span>搜索对话</span></button>
-        <RouterLink class="nav-item" active-class="selected" to="/import"><AppIcon name="library" /><span>资料库</span><span class="nav-badge">PDF · MD</span></RouterLink>
+        <div class="library-nav">
+          <button class="nav-item" :class="{ 'library-active': ['/documents', '/import'].includes(route.path) }" :aria-expanded="libraryOpen" aria-controls="library-subnav" @click="libraryOpen = !libraryOpen"><AppIcon name="library" /><span>资料库</span><AppIcon name="chevron" :size="16" class="library-chevron" :class="{ expanded: libraryOpen }" /></button>
+          <div v-if="libraryOpen" id="library-subnav" class="library-subnav">
+            <RouterLink class="nav-item" active-class="selected" to="/documents"><AppIcon name="file" :size="17" /><span>文档管理</span></RouterLink>
+            <RouterLink class="nav-item" active-class="selected" to="/import"><AppIcon name="upload" :size="17" /><span>上传文档</span><span class="nav-badge">PDF · MD</span></RouterLink>
+          </div>
+        </div>
       </nav>
 
       <div class="sidebar-history">
@@ -94,6 +104,7 @@ async function logout() {
         <div class="shell-heading">
           <button class="icon-button sidebar-toggle" :class="{ 'show-desktop': sidebarCollapsed }" aria-label="展开导航" :aria-expanded="sidebarOpen || !sidebarCollapsed" @click="sidebarCollapsed ? sidebarCollapsed = false : sidebarOpen = !sidebarOpen"><AppIcon name="panel" /></button>
           <span class="page-title">{{ pageTitle }}</span>
+          <template v-if="['/documents', '/import'].includes(route.path)"><span class="library-breadcrumb-divider">/</span><span class="library-breadcrumb-current">{{ route.path === '/documents' ? '文档管理' : '上传文档' }}</span></template>
           <span v-if="route.path === '/chat'" class="page-subtitle">知识库问答</span>
         </div>
         <div id="page-actions" class="page-actions">

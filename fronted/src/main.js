@@ -3,6 +3,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import App from './App.vue'
 import ChatView from './views/ChatView.vue'
 import ImportView from './views/ImportView.vue'
+import DocumentsView from './views/DocumentsView.vue'
 import AuthView from './views/AuthView.vue'
 import { checkSession, clearAuthentication, currentUser } from './state/auth.js'
 import { safeDestination } from './utils/authRedirect.js'
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/', redirect: '/chat' },
     { path: '/chat', component: ChatView },
     { path: '/import', component: ImportView },
+    { path: '/documents', component: DocumentsView },
     { path: '/login', component: AuthView, props: { mode: 'login' }, meta: { public: true } },
     { path: '/register', component: AuthView, props: { mode: 'register' }, meta: { public: true } },
     { path: '/:pathMatch(.*)*', redirect: '/chat' },
