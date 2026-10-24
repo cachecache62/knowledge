@@ -227,6 +227,9 @@ class AuthStore:
     def chat_id(
         self, user_id: int, client_id: str, *, create: bool = False
     ) -> str | None:
+        """
+        根据“用户 ID + 前端对话 ID”，获取对应的后端内部对话 ID；需要时创建这条映射
+        """
         statement = select(chat_sessions.c.internal_id).where(
             chat_sessions.c.user_id == user_id,
             chat_sessions.c.client_id == client_id,

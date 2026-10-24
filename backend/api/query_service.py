@@ -14,6 +14,7 @@ from auth.dependencies import CurrentUser, Store, configure_auth_support
 from processor.query_processor.main_graph import KBQueryWorkflow
 from tool.logger import logger
 from utils.mongo_history_utils import clear_history, get_recent_messages
+from utils.document_visibility import KnowledgeRetrievalError
 from utils.sse_utils import (
     SSEEvent, create_sse_queue, get_sse_queue, push_to_session, sse_generator,
 )
@@ -38,6 +39,7 @@ async def query(background_tasks: BackgroundTasks, request: QueryRequest, user: 
     user_query = request.query.strip()
     if not user_query:
         raise HTTPException(status_code=422, detail="查询内容不能为空")
+    # 前端传了对话 ID 就沿用，没有就生成一个
     client_session_id = request.session_id or str(uuid.uuid4())
     # 浏览器 ID 仅用于定位当前用户的映射；不直接用它查询他人的 MongoDB 历史。
     session_id = await run_in_threadpool(store.chat_id, user.id, client_session_id, create=True)
@@ -57,6 +59,8 @@ async def query(background_tasks: BackgroundTasks, request: QueryRequest, user: 
     try:
         # 同步 Graph、LLM 和 MCP 在工作线程中执行，避免阻塞事件循环。
         result = await run_in_threadpool(run_query_graph, session_id, user_query, False)
+    except KnowledgeRetrievalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"问答处理失败：{exc}") from exc
     return {

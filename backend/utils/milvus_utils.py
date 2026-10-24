@@ -2,7 +2,7 @@ from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker
 
 from config.milvus_config import milvus_config
 from tool.logger import logger
-from utils.document_visibility import build_retrieval_filter, filter_visible_documents
+from utils.document_visibility import KnowledgeRetrievalError, build_retrieval_filter, filter_visible_documents
 
 _milvus_client = None
 
@@ -47,7 +47,11 @@ def create_hybrid_search_requests(dense_vector, sparse_vector, dense_params=None
     :return: 搜索请求列表，包含[dense_req, sparse_req]
     """
     # 所有检索入口（普通、HyDE、商品名）使用同一份文档可见性规则。
-    expr = build_retrieval_filter(expr)
+    try:
+        expr = build_retrieval_filter(expr)
+    except Exception as exc:
+        logger.exception("无法读取知识库文档可见性")
+        raise KnowledgeRetrievalError("无法读取知识库文档状态，请稍后重试") from exc
 
     # 稠密向量默认搜索参数：余弦相似度（COSINE），适配BGE-M3稠密向量
     if dense_params is None:
@@ -90,7 +94,7 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
     :param limit: 混合搜索最终返回结果数量，默认5
     :param output_fields: 需要返回的字段列表，默认返回item_name
     :param search_params: 搜索参数，如ef/topk等，默认None
-    :return: 混合搜索结果列表，搜索失败返回None
+    :return: 混合搜索结果列表；查询失败抛出 KnowledgeRetrievalError
     """
     try:
         # 初始化加权排名器：按权重融合稠密/稀疏向量的搜索结果
@@ -118,4 +122,4 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
         return res
     except Exception as e:
         logger.error(f"Milvus混合搜索执行失败，集合[{collection_name}]：{str(e)}", exc_info=True)
-        return None
+        raise KnowledgeRetrievalError("知识库检索暂时不可用，请稍后重试") from e

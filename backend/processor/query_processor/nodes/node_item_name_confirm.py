@@ -1,6 +1,7 @@
 # processor/query_processor/nodes/node_item_name_confirm.py
 
 import json
+import re
 from typing import Tuple, List, Dict
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -18,6 +19,7 @@ from utils.json_format_utils import serialize_json
 from utils.milvus_utils import get_milvus_client, create_hybrid_search_requests, hybrid_search
 from utils.mongo_history_utils import get_recent_messages, save_chat_message, update_message_item_names
 from utils.task_utils import add_done_task
+from utils.document_visibility import KnowledgeRetrievalError
 
 
 class NodeItemNameConfirm(NodeBase):
@@ -165,10 +167,19 @@ class NodeItemNameConfirm(NodeBase):
             response = chant_model.invoke(messages)
             content = response.content
 
-            # 5. 数据清洗：去掉可能的代码围栏（```json 和 ```）
+            
+             # 5. 数据清洗：去掉可能的代码围栏（```json 和 ```）
             if content.startswith("```json"):
                 # content = content[6:]
-                content.replace("```json", "").replace("```", "")
+                content = content.replace("```json", "").replace("```", "")
+
+
+            # # 5. 去掉模型可能返回的 JSON 代码围栏，并校验响应类型。
+            # if not isinstance(content, str):
+            #     raise ValueError("产品名称识别响应必须是 JSON 文本")
+            # content = content.strip()
+            # if content.startswith("```"):
+            #     content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
 
             # 6. JSON数据的解析（将JSON字符串转换为字典）
             result = json.loads(content)
@@ -192,7 +203,6 @@ class NodeItemNameConfirm(NodeBase):
             ]
 
             return result
-
         except Exception as e:
             # 捕获所有异常（如LLM调用失败、JSON解析失败等），记录错误日志
             logger.error(f"大模型调用异常：{e}")
@@ -228,8 +238,7 @@ class NodeItemNameConfirm(NodeBase):
             results = []
             # 3. 校验是否成功获取到client对象
             if not milvus_client:
-                logger.warning("Milvus 获取失败，跳过向量化处理")
-                return results
+                raise KnowledgeRetrievalError("知识库连接暂时不可用，请稍后重试")
 
             # 4. 获取milvus中集合的名字
             collection_name = milvus_config.item_name_collection
@@ -268,7 +277,8 @@ class NodeItemNameConfirm(NodeBase):
                 })
 
         except Exception as e:
-            logger.warning(f"混合检索异常：{e}")
+            logger.exception("商品名称检索失败")
+            raise KnowledgeRetrievalError("知识库商品名称检索暂时不可用，请稍后重试") from e
 
         return results
 
@@ -405,24 +415,14 @@ class NodeItemNameConfirm(NodeBase):
 
     def _step_8_write_history(self, state, session_id, rewritten_query, message_id):
         """
-         8 把本次处理的核心信息（用户问题、助手答案、商品名、改写查询）写入MongoDB的会话历史
-         包含2个核心操作：1. 写入助手答案（若有）；2. 更新用户原始问题的关联信息
+         8 更新本次用户问题的商品名、改写查询等信息。
+         助手答案统一由 node_answer_output 保存，避免澄清或拒识提示被重复插入。
          :param state: 字典 - step6更新后的会话状态，包含answer/item_names等字段
          :param session_id: 字符串 - 会话唯一标识
          :param rewritten_query: 字符串 - step3改写后的完整问题
          :param message_id: 字符串 - 本次用户问题的消息唯一ID
          :return:
          """
-        # 若会话状态中有助手答案（分支B/C），写入助手消息到历史
-        if state.get("answer"):
-            save_chat_message(
-                session_id=session_id,  # 会话ID，关联所属会话
-                role="assistant",  # 消息角色：助手
-                text=state["answer"],  # 消息内容：向用户确认的提示语/无结果提示语
-                rewritten_query="",  # 助手消息无需改写查询，设为空
-                item_names=state.get("item_names", [])  # 关联的商品名列表（分支B/C均为空）
-            )
-
         # 强制更新本次用户原始问题的关联信息（核心：补充改写查询、商品名）
         save_chat_message(
             session_id=session_id,  # 会话ID，关联所属会话

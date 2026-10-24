@@ -19,6 +19,7 @@ from auth.dependencies import get_current_user
 from auth.store import User, get_auth_store, utcnow
 from utils import sse_utils, task_utils
 from utils.import_registry import ImportRegistry
+from utils.document_visibility import KnowledgeRetrievalError
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -142,6 +143,21 @@ class ApiFrontendTests(unittest.TestCase):
         self.assertIn("event: error", response.text)
         self.assertIn("模拟模型异常", response.text)
         self.assertIsNone(sse_utils.get_sse_queue("stream-failed"))
+
+    def test_recognition_quota_failure_is_reported_by_http_and_stream(self) -> None:
+        workflow = MagicMock()
+        message = "产品名称识别模型的免费额度已用尽，请检查模型服务额度。"
+        workflow.run.side_effect = KnowledgeRetrievalError(message)
+        with patch.object(self.query_api, "KBQueryWorkflow", return_value=workflow):
+            sync = self.query_client.post("/query", json={"query": "Aolynk CB304n是什么", "session_id": "quota-sync"})
+            streamed = self.query_client.post("/query", json={"query": "Aolynk CB304n是什么", "session_id": "quota-stream", "is_stream": True})
+        self.assertEqual(sync.status_code, 503)
+        self.assertEqual(sync.json()["detail"], message)
+        self.assertEqual(streamed.status_code, 200)
+        stream = self.query_client.get("/stream/quota-stream")
+        self.assertIn("event: error", stream.text)
+        self.assertIn(message, stream.text)
+        self.assertNotIn("未找到相关产品", stream.text)
 
     def test_validation_and_busy_session_do_not_overwrite_queue(self) -> None:
         self.assertEqual(self.query_client.post("/query", json={"query": "   "}).status_code, 422)

@@ -7,6 +7,7 @@ from utils.embedding_utils import generate_embeddings
 from utils.json_format_utils import serialize_json
 from utils.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from utils.task_utils import add_done_task
+from utils.document_visibility import KnowledgeRetrievalError
 
 
 class NodeSearchEmbedding(NodeBase):
@@ -82,9 +83,12 @@ class NodeSearchEmbedding(NodeBase):
              # 7、构造并返回结果：若检索结果非空，取res[0]，否则返回空列表
              return {"embedding_chunks": res[0] if res else []}
 
+         except KnowledgeRetrievalError:
+             logger.exception("知识库切片检索不可用")
+             raise
          except Exception as e:
              logger.exception(f"向量搜索失败: {e}")
-             return {}
+             raise KnowledgeRetrievalError("知识库切片检索暂时不可用，请稍后重试") from e
 
 
 

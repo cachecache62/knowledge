@@ -8,6 +8,10 @@ from typing import Any
 from utils.import_registry import get_import_registry
 
 
+class KnowledgeRetrievalError(RuntimeError):
+    """检索不可用，不能作为正常的零匹配结果继续生成回答。"""
+
+
 def visible_sources() -> tuple[set[str], set[str]]:
     registry = get_import_registry()
     rows = registry.retrieval_sources()
@@ -33,10 +37,11 @@ def build_retrieval_filter(expr: str | None = None) -> str:
     task_ids, titles = visible_sources()
     # 使用非空的无效任务标识，避免生成 Milvus 不接受的空 in 表达式。
     task_values = json.dumps(sorted(task_ids) or [""], ensure_ascii=False)
-    visibility = f"(exists source_task_id and source_task_id in {task_values})"
+    # exists 判断必须单独加括号，避免 Milvus 把后面的逻辑表达式一并解析进去。
+    visibility = f"((exists source_task_id) and (source_task_id in {task_values}))"
     if titles:
         title_values = json.dumps(sorted(titles), ensure_ascii=False)
-        visibility = f"({visibility} or (not exists source_task_id and file_title in {title_values}))"
+        visibility = f"({visibility} or ((not (exists source_task_id)) and (file_title in {title_values})))"
     return f"({expr}) and ({visibility})" if expr else visibility
 
 

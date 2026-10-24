@@ -430,6 +430,8 @@ class DocumentManagementTests(unittest.TestCase):
         tagged, _, _ = self.document("new.pdf")
         failed, _, _ = self.document("failed.pdf", status="failed")
         expr = document_visibility.build_retrieval_filter('item_name in ["设备"]')
+        self.assertIn("(exists source_task_id)", expr)
+        self.assertIn("(not (exists source_task_id))", expr)
         self.assertIn('item_name in ["设备"]', expr)
         self.assertIn(tagged, expr)
         self.assertNotIn(failed, expr)
@@ -478,7 +480,8 @@ class DocumentManagementTests(unittest.TestCase):
         with patch.object(self.registry, "retrieval_sources", side_effect=RuntimeError("database unavailable")):
             with self.assertRaises(RuntimeError):
                 module.create_hybrid_search_requests([1], {0: 1})
-            self.assertIsNone(module.hybrid_search(client, "chunks", reqs))
+            with self.assertRaises(document_visibility.KnowledgeRetrievalError):
+                module.hybrid_search(client, "chunks", reqs)
 
     def test_deleted_after_rerank_is_removed_before_prompt_generation(self) -> None:
         task_id, _, _ = self.document()
@@ -506,6 +509,22 @@ class DocumentManagementTests(unittest.TestCase):
         self.assertNotIn("deleted-secret", state["prompt"])
         self.assertIn("web-reference", state["prompt"])
         self.assertEqual(len(state["reranked_docs"]), 1)
+
+    def test_product_lookup_error_is_not_reported_as_no_matching_product(self) -> None:
+        failure = document_visibility.KnowledgeRetrievalError("检索不可用")
+        with patch.dict("sys.modules", {
+            "utils.embedding_utils": protocol_tests.stub_module("utils.embedding_utils", generate_embeddings=MagicMock(return_value={"dense": [[1]], "sparse": [{0: 1}]})),
+            "utils.milvus_utils": protocol_tests.stub_module("utils.milvus_utils", get_milvus_client=MagicMock(return_value=object()),
+                create_hybrid_search_requests=MagicMock(return_value=[]), hybrid_search=MagicMock(side_effect=failure)),
+            "utils.mongo_history_utils": protocol_tests.stub_module("utils.mongo_history_utils", get_recent_messages=MagicMock(),
+                save_chat_message=MagicMock(), update_message_item_names=MagicMock()),
+        }):
+            spec = importlib.util.spec_from_file_location("lookup_error_test", protocol_tests.ROOT / "processor/query_processor/nodes/node_item_name_confirm.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        node = object.__new__(module.NodeItemNameConfirm)
+        with self.assertRaises(document_visibility.KnowledgeRetrievalError):
+            node._step_5_vectorize_and_query(["设备"])
 
 
 if __name__ == "__main__":
