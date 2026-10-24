@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 function read(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
@@ -6,6 +6,8 @@ function read(key, fallback) {
 
 let ownerId = null
 export const conversations = ref([])
+const conversationTime = item => Number.isFinite(Number(item.updatedAt)) ? Number(item.updatedAt) : 0
+export const recentConversations = computed(() => [...conversations.value].sort((a, b) => conversationTime(b) - conversationTime(a)))
 export const activeSessionId = ref(`sess-${crypto.randomUUID()}`)
 export const conversationBusy = ref(false)
 
@@ -41,9 +43,9 @@ export function newConversation() {
   persist()
 }
 
-export function rememberConversation(text, id = activeSessionId.value) {
+export function rememberConversation(text, id = activeSessionId.value, updatedAt = Date.now()) {
   const existing = conversations.value.find(item => item.id === id)
-  const entry = { id, title: existing && existing.title !== '上次的对话' ? existing.title : text.replace(/\s+/g, ' ').trim().slice(0, 36), updatedAt: Date.now() }
+  const entry = { id, title: existing && existing.title !== '上次的对话' ? existing.title : text.replace(/\s+/g, ' ').trim().slice(0, 36), updatedAt }
   conversations.value = [entry, ...conversations.value.filter(item => item.id !== id)]
   persist()
 }

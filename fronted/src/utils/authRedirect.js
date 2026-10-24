@@ -1,4 +1,4 @@
 // 只允许跳回应用内已有的业务页面，拒绝外部网址和账号页重定向循环。
 export function safeDestination(value) {
-  return typeof value === 'string' && /^\/(chat|import|documents|trash|import-traces(?:\/[0-9a-fA-F-]{36})?)(?:[?#]|$)/.test(value) ? value : '/chat'
+  return typeof value === 'string' && /^\/(chat(?:\/[A-Za-z0-9_-]{1,128})?|import|documents|trash|import-traces(?:\/[0-9a-fA-F-]{36})?)(?:[?#]|$)/.test(value) ? value : '/chat'
 }

@@ -2,42 +2,55 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from './components/AppIcon.vue'
-import { activeSessionId, conversationBusy, conversations, newConversation, selectConversation } from './state/conversations.js'
+import { activeSessionId, conversationBusy, recentConversations, newConversation } from './state/conversations.js'
+import { chatPath } from './utils/chatRouting.js'
 import { authChecked, currentUser, signOut } from './state/auth.js'
 import { chatToolbar } from './state/chatToolbar.js'
 
 const route = useRoute()
 const router = useRouter()
+const isChatPage = computed(() => route.name === 'chat')
 const isLibraryPage = computed(() => ['/documents', '/import', '/trash'].includes(route.path) || route.path.startsWith('/import-traces'))
 const libraryPageTitle = computed(() => ({ '/documents': '文档管理', '/import': '上传文档', '/trash': '回收站', '/import-traces': '导入路由记录' })[route.path] || '导入路由详情')
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(false)
 const libraryOpen = ref(isLibraryPage.value)
+const historyOpen = ref(true)
 const searchOpen = ref(false)
 const search = ref('')
 const searchInput = ref(null)
 const loggingOut = ref(false)
 const logoutError = ref('')
-const filteredConversations = computed(() => conversations.value.filter(item => item.title.toLowerCase().includes(search.value.trim().toLowerCase())))
+const filteredConversations = computed(() => recentConversations.value.filter(item => item.title.toLowerCase().includes(search.value.trim().toLowerCase())))
 const pageTitle = computed(() => isLibraryPage.value ? '资料库' : ({ '/login': '账号中心', '/register': '账号中心' })[route.path] || '掌柜智库')
 
 function startChat() {
+  if (conversationBusy.value) return
   newConversation()
-  router.push('/chat')
+  router.push(chatPath())
   sidebarOpen.value = false
 }
 
 function openConversation(id) {
-  selectConversation(id)
-  router.push('/chat')
+  if (conversationBusy.value) return
+  router.push(chatPath(id))
   sidebarOpen.value = false
 }
 
 async function openSearch() {
   searchOpen.value = !searchOpen.value
+  if (searchOpen.value) historyOpen.value = true
   if (!searchOpen.value) search.value = ''
   await nextTick()
   searchInput.value?.focus()
+}
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value
+  if (!historyOpen.value) {
+    searchOpen.value = false
+    search.value = ''
+  }
 }
 
 watch(() => route.path, (path) => {
@@ -88,11 +101,13 @@ async function logout() {
       </nav>
 
       <div class="sidebar-history">
-        <div class="sidebar-label">最近对话</div>
+        <button class="sidebar-label history-toggle" :aria-expanded="historyOpen" aria-controls="recent-conversations" @click="toggleHistory"><span>最近对话</span><AppIcon name="chevron" :size="14" class="history-chevron" :class="{ collapsed: !historyOpen }" /></button>
         <div v-if="searchOpen" class="history-search"><AppIcon name="search" :size="15" /><input ref="searchInput" v-model="search" aria-label="搜索最近对话" placeholder="搜索最近对话…" /><button v-if="search" class="icon-button" aria-label="清空搜索" @click="search = ''"><AppIcon name="close" :size="14" /></button></div>
-        <div class="conversation-list">
-          <button v-for="item in filteredConversations" :key="item.id" class="conversation-item" :class="{ active: route.path === '/chat' && item.id === activeSessionId }" :disabled="conversationBusy" :title="item.title" :aria-current="route.path === '/chat' && item.id === activeSessionId ? 'page' : undefined" @click="openConversation(item.id)"><span>{{ item.title }}</span></button>
-          <p v-if="!filteredConversations.length" class="history-empty">{{ search ? '没有找到相关对话' : '从一个问题开始，\n让知识在这里积累。' }}</p>
+        <div v-show="historyOpen" id="recent-conversations" class="conversation-panel">
+          <div class="conversation-list" role="region" aria-label="最近对话，按最近更新时间倒序" tabindex="0">
+            <button v-for="item in filteredConversations" :key="item.id" class="conversation-item" :class="{ active: isChatPage && item.id === activeSessionId }" :disabled="conversationBusy" :title="item.title" :aria-current="isChatPage && item.id === activeSessionId ? 'page' : undefined" @click="openConversation(item.id)"><span>{{ item.title }}</span></button>
+            <p v-if="!filteredConversations.length" class="history-empty">{{ search ? '没有找到相关对话' : '从一个问题开始，\n让知识在这里积累。' }}</p>
+          </div>
         </div>
       </div>
 
@@ -109,10 +124,10 @@ async function logout() {
           <button class="icon-button sidebar-toggle" :class="{ 'show-desktop': sidebarCollapsed }" aria-label="展开导航" :aria-expanded="sidebarOpen || !sidebarCollapsed" @click="sidebarCollapsed ? sidebarCollapsed = false : sidebarOpen = !sidebarOpen"><AppIcon name="panel" /></button>
           <span class="page-title">{{ pageTitle }}</span>
           <template v-if="isLibraryPage"><span class="library-breadcrumb-divider">/</span><span class="library-breadcrumb-current">{{ libraryPageTitle }}</span></template>
-          <span v-if="route.path === '/chat'" class="page-subtitle">知识库问答</span>
+          <span v-if="isChatPage" class="page-subtitle">知识库问答</span>
         </div>
         <div id="page-actions" class="page-actions">
-          <template v-if="route.path === '/chat' && chatToolbar">
+          <template v-if="isChatPage && chatToolbar">
             <span class="connection-status" :class="{ connected: chatToolbar.connected }" role="status"><span></span>{{ chatToolbar.connected ? '服务已连接' : '服务未连接' }}</span>
             <button class="text-button clear-button" :disabled="chatToolbar.disabled" @click="chatToolbar.clear"><AppIcon name="trash" :size="16" /><span>{{ chatToolbar.clearing ? '清空中…' : '清空对话' }}</span></button>
           </template>

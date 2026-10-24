@@ -45,7 +45,13 @@ svg { flex-shrink: 0; }
 .library-breadcrumb-current { color: #8490a1; font-size: 13px; }
 .sidebar-history { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .sidebar-label { font-size: 11px; color: #999; padding: 10px 12px 12px; }
-.conversation-list { overflow-y: auto; padding-bottom: 12px; flex: 1; scrollbar-width: thin; scrollbar-color: #dedede transparent; }
+.history-toggle { display: flex; align-items: center; align-self: flex-start; gap: 6px; flex-shrink: 0; border: 0; background: transparent; text-align: left; }
+.history-toggle:hover { color: #555; }
+.history-chevron { transition: transform .15s ease; }
+.history-chevron.collapsed { transform: rotate(-90deg); }
+.conversation-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+.conversation-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; flex: 1; scrollbar-width: thin; scrollbar-color: #dedede transparent; }
+.conversation-list:focus-visible { outline: 2px solid #6d849d; outline-offset: -2px; border-radius: 6px; }
 .conversation-item { display: flex; align-items: center; width: 100%; min-height: 39px; padding: 10px 12px; background: transparent; border: 0; border-radius: 8px; text-align: left; font-size: 13px; }
 .conversation-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-item:hover, .conversation-item.active { background: #eaeaea; }

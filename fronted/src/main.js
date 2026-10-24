@@ -9,13 +9,14 @@ import ImportTracesView from './views/ImportTracesView.vue'
 import AuthView from './views/AuthView.vue'
 import { checkSession, clearAuthentication, currentUser } from './state/auth.js'
 import { safeDestination } from './utils/authRedirect.js'
+import { synchronizeChatRoute } from './utils/chatRouting.js'
 import './style.css'
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/chat' },
-    { path: '/chat', component: ChatView },
+    { path: '/chat/:sessionId?', name: 'chat', component: ChatView },
     { path: '/import', component: ImportView },
     { path: '/documents', component: DocumentsView },
     { path: '/trash', component: TrashView },
@@ -30,7 +31,8 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   const user = await checkSession()
   if (to.meta.public) return user ? safeDestination(to.query.redirect) : true
-  return user ? true : { path: '/login', query: { redirect: safeDestination(to.fullPath) } }
+  if (!user) return { path: '/login', query: { redirect: safeDestination(to.fullPath) } }
+  return synchronizeChatRoute(to)
 })
 
 window.addEventListener('kb:unauthorized', () => {

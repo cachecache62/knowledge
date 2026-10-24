@@ -108,7 +108,10 @@ async function loadHistory() {
       timestamp: item.ts, imageUrls: Array.isArray(item.image_urls) ? item.image_urls : [],
     }))
     const firstQuestion = messages.value.find(item => item.role === 'user')
-    if (firstQuestion) rememberConversation(firstQuestion.text)
+    if (firstQuestion) {
+      const lastMessageTime = Math.max(0, ...messages.value.map(message => Number(message.timestamp) * 1000).filter(Number.isFinite))
+      rememberConversation(firstQuestion.text, sessionId, lastMessageTime)
+    }
     scrollToBottom()
   } catch (error) {
     if (!disposed && version === historyVersion) notice.value = `历史记录加载失败：${error.message}`
