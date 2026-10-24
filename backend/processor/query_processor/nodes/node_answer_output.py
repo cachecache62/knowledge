@@ -11,6 +11,7 @@ from tool.logger import logger
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
 from utils.llm_utils import get_llm_client
+from utils.document_visibility import filter_visible_documents
 from utils.mongo_history_utils import save_chat_message
 from utils.sse_utils import push_to_session, SSEEvent
 from utils.task_utils import add_done_task, set_task_result
@@ -42,6 +43,9 @@ class NodeAnswerOutput(NodeBase):
                 ]
               }
         """
+
+        # 删除可能发生在召回或重排期间；构建提示词前再检查，避免引用回收站文档。
+        state["reranked_docs"] = filter_visible_documents(state.get("reranked_docs") or [])
 
         # 阶段一：检查answer是否存在,如果存在直接输出answer中的答案
         answer_exists = self._step_1_check_answer(state)

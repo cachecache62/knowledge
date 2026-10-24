@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib
+import importlib.util
 import os
 import re
 import tempfile
@@ -24,6 +25,7 @@ from auth.store import AuthStore, beijing_now, get_auth_store
 from config.auth_config import get_auth_config
 from test import test_api_frontend as protocol_tests
 from utils.import_registry import ImportRegistry, documents
+from utils import document_visibility
 from utils.task_utils import get_task_status, update_task_status
 
 
@@ -49,6 +51,13 @@ class ObjectStore:
             raise RuntimeError("storage unavailable")
         self.objects.pop(key, None)
 
+    def stat_object(self, bucket: str, key: str) -> object:
+        if self.fail_delete:
+            raise RuntimeError("storage unavailable")
+        if key not in self.objects:
+            raise S3Error(response=None, code="NoSuchKey", message="missing", resource=key, request_id="test", host_id="test")
+        return object()
+
 
 class VectorStore:
     def __init__(self) -> None:
@@ -57,6 +66,12 @@ class VectorStore:
 
     def has_collection(self, name: str) -> bool:
         return name in self.rows
+
+    def query(self, *, collection_name: str, filter: str, **kwargs: Any) -> list[dict[str, str]]:
+        value = re.search("'([^']+)'", filter).group(1)
+        if filter.startswith("source_task_id =="):
+            return [row for row in self.rows[collection_name] if row.get("source_task_id") == value][:1]
+        return [row for row in self.rows[collection_name] if row["file_title"] == value and "source_task_id" not in row][:1]
 
     def delete(self, *, collection_name: str, filter: str) -> None:
         self.calls.append((collection_name, filter))
@@ -97,6 +112,7 @@ class DocumentManagementTests(unittest.TestCase):
         self.vectors = VectorStore()
         self._patch(patch.dict(os.environ, {"DATA_BASED_ROOT_DIR": str(self.root)}))
         self._patch(patch.object(self.api, "get_import_registry", return_value=self.registry))
+        self._patch(patch.object(document_visibility, "get_import_registry", return_value=self.registry))
         self._patch(patch.object(self.api, "get_minio_client", return_value=self.objects))
         self._patch(patch.dict("sys.modules", {
             "utils.minio_utils": protocol_tests.stub_module("utils.minio_utils", get_minio_client=lambda: self.objects),
@@ -162,28 +178,35 @@ class DocumentManagementTests(unittest.TestCase):
         self.api.app.dependency_overrides[get_current_user] = lambda: self.other
         self.assertEqual(self.client.get(f"/documents/{task_id}/download").status_code, 404)
         self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 404)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 404)
+        self.assertEqual(self.client.get("/documents/trash").json()["total"], 0)
         self.assertTrue(path.exists())
         self.assertFalse(self.vectors.calls)
         del self.api.app.dependency_overrides[get_current_user]
         self.assertEqual(self.client.get(f"/documents/{task_id}/download").status_code, 401)
         self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 401)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 401)
+        self.assertEqual(self.client.get("/documents/trash").status_code, 401)
 
-    def test_deletion_cleans_resources_and_soft_deletes_document_record(self) -> None:
+    def test_deletion_preserves_resources_and_is_idempotent(self) -> None:
         task_id, path, key = self.document()
         record = self.registry.get_document(self.user.id, task_id)
         self.objects.objects["images/manual/one.png"] = b"image"
         update_task_status(task_id, "completed")
         response = self.client.delete(f"/documents/{task_id}")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(path.parent.exists())
-        self.assertNotIn(key, self.objects.objects)
-        self.assertNotIn("images/manual/one.png", self.objects.objects)
-        self.assertTrue(all(not rows for rows in self.vectors.rows.values()))
+        self.assertTrue(path.is_file())
+        self.assertIn(key, self.objects.objects)
+        self.assertIn("images/manual/one.png", self.objects.objects)
+        self.assertTrue(all(rows[0]["source_task_id"] == task_id for rows in self.vectors.rows.values()))
+        self.assertFalse(self.vectors.calls)
         self.assertTrue(self.store.owns_import(self.user.id, task_id))
         with self.engine.connect() as connection:
             retained = connection.execute(select(documents).where(documents.c.task_id == task_id)).mappings().one()
         self.assertTrue(retained["is_deleted"])
         self.assertIsNone(retained["active_hash"])
+        self.assertIsNotNone(retained["deleted_at"])
+        self.assertEqual(retained["deleted_by"], self.user.id)
         self.assertEqual(retained["status"], record["status"])
         self.assertEqual(retained["file_hash"], record["file_hash"])
         self.assertEqual(retained["created_at"], record["created_at"])
@@ -192,7 +215,7 @@ class DocumentManagementTests(unittest.TestCase):
         self.assertEqual(self.registry.list_documents(self.user.id)["total"], 0)
         self.assertEqual(self.client.get(f"/documents/{task_id}/download").status_code, 404)
         calls_before = len(self.vectors.calls)
-        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 404)
+        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
         self.assertEqual(len(self.vectors.calls), calls_before)
         accepted, _ = self.registry.claim(str(uuid.uuid4()), "manual.pdf", record["file_hash"])
         self.assertTrue(accepted)
@@ -230,6 +253,9 @@ class DocumentManagementTests(unittest.TestCase):
         response = self.client.delete(f"/documents/{task_id}", headers={"Origin": "https://untrusted.example"})
         self.assertEqual(response.status_code, 403)
         self.assertTrue(path.exists())
+        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore", headers={"Origin": "https://untrusted.example"}).status_code, 403)
+        self.assertEqual(self.client.get("/documents/trash").json()["total"], 1)
 
     def test_import_nodes_attach_task_identity_and_preserve_raw_titles(self) -> None:
         # 导入真实节点方法，但替换向量/embedding 模块，避免模型初始化和网络访问。
@@ -256,14 +282,13 @@ class DocumentManagementTests(unittest.TestCase):
             self.assertEqual(client.insert.call_args.kwargs["data"]["source_task_id"], task_id)
             self.assertEqual(client.insert.call_args.kwargs["data"]["file_title"], "manual's title")
 
-    def test_failure_retains_record_and_allows_idempotent_retry(self) -> None:
+    def test_move_to_trash_does_not_depend_on_external_storage(self) -> None:
         task_id, path, _ = self.document()
         self.objects.fail_delete = True
-        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 503)
+        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
         self.assertTrue(path.exists())
         self.assertTrue(self.store.owns_import(self.user.id, task_id))
-        self.assertEqual(self.registry.get_document(self.user.id, task_id)["status"], "completed")
-        self.assertFalse(self.registry.get_document(self.user.id, task_id)["is_deleted"])
+        self.assertEqual(self.registry.list_documents(self.user.id, deleted=True)["total"], 1)
         self.objects.fail_delete = False
         self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
 
@@ -273,16 +298,20 @@ class DocumentManagementTests(unittest.TestCase):
         self.objects.objects["images/manual/one.png"] = b"shared"
         response = self.client.delete(f"/documents/{task_id}")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(path.exists())
+        self.assertTrue(path.exists())
         self.assertTrue(other_path.exists())
         self.assertIn("images/manual/one.png", self.objects.objects)
-        self.assertTrue(all(rows[0]["source_task_id"] == other_id for rows in self.vectors.rows.values()))
+        self.assertTrue(all({row["source_task_id"] for row in rows} == {task_id, other_id} for rows in self.vectors.rows.values()))
+        hits = [{"entity": row} for row in self.vectors.rows["chunks"]]
+        self.assertEqual([hit["entity"]["source_task_id"] for hit in document_visibility.filter_visible_documents(hits)], [other_id])
 
     def test_legacy_deletion_and_same_title_conflict(self) -> None:
         task_id, path, _ = self.document(legacy=True)
         self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
-        self.assertFalse(path.exists())
-        self.assertTrue(all("not exists source_task_id" in expression for _, expression in self.vectors.calls))
+        self.assertTrue(path.exists())
+        self.assertFalse(self.vectors.calls)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 200)
+        self.assertIn("manual", document_visibility.visible_sources()[1])
         first, first_path, _ = self.document(legacy=True)
         self.document(owner=self.other.id)
         response = self.client.delete(f"/documents/{first}")
@@ -294,7 +323,8 @@ class DocumentManagementTests(unittest.TestCase):
         with self.engine.begin() as connection:
             connection.execute(update(documents).where(documents.c.task_id == task_id).values(storage_path="../outside/manual.pdf"))
         self.assertEqual(self.client.get(f"/documents/{task_id}/download").status_code, 409)
-        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 409)
+        self.assertEqual(self.client.delete(f"/documents/{task_id}").status_code, 200)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 409)
         self.assertTrue(path.exists())
         self.assertFalse(self.vectors.calls)
 
@@ -307,10 +337,172 @@ class DocumentManagementTests(unittest.TestCase):
         registry = ImportRegistry(engine)
         registry.create_schema()
         registry.create_schema()
-        self.assertTrue({"storage_path", "object_key", "vector_key", "is_deleted"}.issubset({column["name"] for column in inspect(engine).get_columns(documents.name)}))
+        self.assertTrue({"storage_path", "object_key", "vector_key", "is_deleted", "deleted_at", "deleted_by"}.issubset({column["name"] for column in inspect(engine).get_columns(documents.name)}))
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT filename FROM kb_import_documents")).scalar_one(), "original.pdf")
             self.assertEqual(connection.execute(text("SELECT is_deleted FROM kb_import_documents")).scalar_one(), 0)
+
+    def test_trash_search_pagination_and_owner_isolation(self) -> None:
+        first, _, _ = self.document("first.pdf")
+        second, _, _ = self.document("second.pdf", status="failed")
+        other, _, _ = self.document("other.pdf", owner=self.other.id)
+        self.client.delete(f"/documents/{first}")
+        self.client.delete(f"/documents/{second}")
+        self.registry.delete_document(self.other.id, other)
+        page = self.client.get("/documents/trash?page_size=1").json()
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(page["items"][0]["task_id"], second)
+        self.assertTrue(page["items"][0]["can_restore"])
+        self.assertTrue(page["items"][0]["deleted_at"].endswith("+00:00"))
+        self.assertEqual(self.client.get("/documents/trash?keyword=first").json()["items"][0]["task_id"], first)
+        self.assertEqual(self.client.get("/documents/trash?status=failed").json()["total"], 1)
+        self.assertEqual(self.client.get("/documents/trash?page_size=101").status_code, 422)
+
+    def test_restore_returns_same_file_and_reenables_retrieval(self) -> None:
+        task_id, path, _ = self.document()
+        content = path.read_bytes()
+        local = {"source": "local", "source_task_id": task_id, "content": "knowledge"}
+        web = {"source": "web", "content": "web"}
+        self.assertEqual(document_visibility.filter_visible_documents([local, web]), [local, web])
+        self.client.delete(f"/documents/{task_id}")
+        self.assertNotIn(task_id, document_visibility.build_retrieval_filter())
+        self.assertEqual(document_visibility.filter_visible_documents([local, web]), [web])
+        response = self.client.post(f"/documents/{task_id}/restore")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/documents/trash").json()["total"], 0)
+        self.assertEqual(self.client.get(f"/documents/{task_id}/download").content, content)
+        restored = self.registry.get_document(self.user.id, task_id)
+        self.assertIsNone(restored["deleted_at"])
+        self.assertIsNone(restored["deleted_by"])
+        self.assertEqual(restored["active_hash"], restored["file_hash"])
+        self.assertEqual(document_visibility.filter_visible_documents([local, web]), [local, web])
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 200)
+
+    def test_restore_conflict_rolls_back_and_failed_document_keeps_status(self) -> None:
+        task_id, _, _ = self.document()
+        file_hash = self.registry.get_document(self.user.id, task_id)["file_hash"]
+        self.client.delete(f"/documents/{task_id}")
+        self.registry.claim(str(uuid.uuid4()), "duplicate.pdf", file_hash)
+        response = self.client.post(f"/documents/{task_id}/restore")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.client.get("/documents/trash").json()["total"], 1)
+        failed, _, _ = self.document("failed.pdf", status="failed")
+        self.client.delete(f"/documents/{failed}")
+        self.assertEqual(self.client.post(f"/documents/{failed}/restore").status_code, 200)
+        restored = self.registry.get_document(self.user.id, failed)
+        self.assertEqual(restored["status"], "failed")
+        self.assertIsNone(restored["active_hash"])
+        self.assertNotIn(failed, document_visibility.visible_sources()[0])
+
+    def test_old_physical_deletion_is_not_restorable(self) -> None:
+        task_id, _, _ = self.document()
+        with self.engine.begin() as connection:
+            connection.execute(update(documents).where(documents.c.task_id == task_id).values(is_deleted=True, active_hash=None))
+        item = self.client.get("/documents/trash").json()["items"][0]
+        self.assertFalse(item["can_restore"])
+        self.assertIsNone(item["deleted_at"])
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 409)
+
+    def test_restore_checks_backup_missing_files_vectors_and_storage_failure(self) -> None:
+        task_id, path, key = self.document()
+        self.client.delete(f"/documents/{task_id}")
+        path.unlink()
+        self.objects.fail_delete = True
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 503)
+        self.assertEqual(self.client.get("/documents/trash").json()["total"], 1)
+        self.objects.fail_delete = False
+        content = self.objects.objects.pop(key)
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 409)
+        self.objects.objects[key] = content
+        chunks = self.vectors.rows["chunks"]
+        self.vectors.rows["chunks"] = []
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 409)
+        self.vectors.rows["chunks"] = chunks
+        self.assertEqual(self.client.post(f"/documents/{task_id}/restore").status_code, 200)
+        self.assertEqual(self.client.get(f"/documents/{task_id}/download").content, content)
+
+    def test_retrieval_filter_excludes_ambiguous_legacy_and_failed_sources(self) -> None:
+        legacy, _, _ = self.document("设备'手册.pdf", legacy=True)
+        tagged, _, _ = self.document("new.pdf")
+        failed, _, _ = self.document("failed.pdf", status="failed")
+        expr = document_visibility.build_retrieval_filter('item_name in ["设备"]')
+        self.assertIn('item_name in ["设备"]', expr)
+        self.assertIn(tagged, expr)
+        self.assertNotIn(failed, expr)
+        self.assertIn("设备'手册", expr)
+        self.document("设备'手册.md")
+        self.assertFalse(document_visibility.visible_sources()[1])
+        self.assertNotIn(legacy, document_visibility.visible_sources()[0])
+
+    def test_shared_hybrid_search_filters_both_requests_and_rechecks_results(self) -> None:
+        task_id, _, _ = self.document()
+        deleted, _, _ = self.document("deleted.pdf")
+        self.registry.delete_document(self.user.id, deleted)
+        # 执行真实封装，只替换 SDK，不连接 Milvus 或加载任何模型。
+        with patch.dict("sys.modules", {
+            "pymilvus": protocol_tests.stub_module(
+                "pymilvus", MilvusClient=MagicMock(), WeightedRanker=MagicMock(),
+                AnnSearchRequest=lambda **kwargs: types.SimpleNamespace(**kwargs),
+            ),
+        }):
+            spec = importlib.util.spec_from_file_location(
+                "visibility_milvus", protocol_tests.ROOT / "utils" / "milvus_utils.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        reqs = module.create_hybrid_search_requests([1], {0: 1}, expr='item_name in ["设备"]')
+        self.assertEqual(len(reqs), 2)
+        self.assertEqual(reqs[0].expr, reqs[1].expr)
+        self.assertIn(task_id, reqs[0].expr)
+        self.assertNotIn(deleted, reqs[0].expr)
+        self.assertIn('item_name in ["设备"]', reqs[0].expr)
+        client = MagicMock()
+        hits = [{"entity": {"source_task_id": value}} for value in (task_id, deleted)]
+        client.hybrid_search.return_value = [hits]
+        fields = ["item_name"]
+        result = module.hybrid_search(client, "names", reqs, output_fields=fields)
+        self.assertEqual(result, [[hits[0]]])
+        self.assertEqual(fields, ["item_name"])
+        self.assertIn("source_task_id", client.hybrid_search.call_args.kwargs["output_fields"])
+
+        def deleted_during_search(**kwargs: Any) -> list:
+            self.registry.delete_document(self.user.id, task_id)
+            return [hits]
+
+        client.hybrid_search.side_effect = deleted_during_search
+        self.assertEqual(module.hybrid_search(client, "chunks", reqs), [[]])
+        with patch.object(self.registry, "retrieval_sources", side_effect=RuntimeError("database unavailable")):
+            with self.assertRaises(RuntimeError):
+                module.create_hybrid_search_requests([1], {0: 1})
+            self.assertIsNone(module.hybrid_search(client, "chunks", reqs))
+
+    def test_deleted_after_rerank_is_removed_before_prompt_generation(self) -> None:
+        task_id, _, _ = self.document()
+        with patch.dict("sys.modules", {
+            "utils.reranker_http_utils": protocol_tests.stub_module("utils.reranker_http_utils", rerank_documents=MagicMock()),
+            "utils.llm_utils": protocol_tests.stub_module("utils.llm_utils", get_llm_client=MagicMock()),
+            "utils.mongo_history_utils": protocol_tests.stub_module("utils.mongo_history_utils", save_chat_message=MagicMock()),
+            "langchain_core.prompts": protocol_tests.stub_module("langchain_core.prompts", load_prompt=MagicMock()),
+        }):
+            rerank_module = importlib.import_module("processor.query_processor.nodes.node_rerank")
+            answer_module = importlib.import_module("processor.query_processor.nodes.node_answer_output")
+        rerank = object.__new__(rerank_module.NodeRerank)
+        state = {
+            "session_id": str(uuid.uuid4()), "item_names": [], "original_query": "question",
+            "rrf_chunks": [{"source_task_id": task_id, "file_title": "manual", "content": "deleted-secret", "chunk_id": 1}],
+            "web_search_docs": [{"snippet": "web-reference", "title": "web", "url": "https://example.com"}],
+        }
+        state["reranked_docs"] = rerank._step_1_merge_multi_source_docs(state)
+        self.assertEqual(state["reranked_docs"][0]["source_task_id"], task_id)
+        self.registry.delete_document(self.user.id, task_id)
+        answer = object.__new__(answer_module.NodeAnswerOutput)
+        answer._step_3_generate_response = MagicMock()
+        with patch.object(answer_module, "add_done_task"):
+            answer.process(state)
+        self.assertNotIn("deleted-secret", state["prompt"])
+        self.assertIn("web-reference", state["prompt"])
+        self.assertEqual(len(state["reranked_docs"]), 1)
 
 
 if __name__ == "__main__":

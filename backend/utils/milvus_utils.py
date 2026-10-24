@@ -2,6 +2,7 @@ from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker
 
 from config.milvus_config import milvus_config
 from tool.logger import logger
+from utils.document_visibility import build_retrieval_filter, filter_visible_documents
 
 _milvus_client = None
 
@@ -45,6 +46,9 @@ def create_hybrid_search_requests(dense_vector, sparse_vector, dense_params=None
     :param limit: 单向量搜索返回结果数量，默认5
     :return: 搜索请求列表，包含[dense_req, sparse_req]
     """
+    # 所有检索入口（普通、HyDE、商品名）使用同一份文档可见性规则。
+    expr = build_retrieval_filter(expr)
+
     # 稠密向量默认搜索参数：余弦相似度（COSINE），适配BGE-M3稠密向量
     if dense_params is None:
         dense_params = {"metric_type": "COSINE"}
@@ -96,6 +100,7 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
         # 默认返回字段：文档标识字段
         if output_fields is None:
             output_fields = ["item_name"]
+        output_fields = list(dict.fromkeys([*output_fields, "source_task_id", "file_title"]))
 
         # 执行混合搜索：融合稠密+稀疏向量结果，按权重重新排序
         res = client.hybrid_search(
@@ -107,7 +112,9 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
             search_params=search_params
         )
 
-        logger.info(f"Milvus混合搜索完成，集合[{collection_name}]共检索到{len(res[0])}条结果")
+        # 检索期间可能发生删除；发送到后续节点之前再按登记库复查。
+        res = [filter_visible_documents(list(hits)) for hits in res]
+        logger.info(f"Milvus混合搜索完成，集合[{collection_name}]共检索到{len(res[0]) if res else 0}条结果")
         return res
     except Exception as e:
         logger.error(f"Milvus混合搜索执行失败，集合[{collection_name}]：{str(e)}", exc_info=True)

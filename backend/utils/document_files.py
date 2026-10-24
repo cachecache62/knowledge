@@ -140,6 +140,40 @@ def download_document(
     raise HTTPException(status_code=404, detail="原文档文件不存在，可能已被移动或清理")
 
 
+def ensure_document_recoverable(record: dict[str, Any]) -> None:
+    """恢复前只读检查存储；任何失败都让文档继续留在回收站。"""
+    from config.milvus_config import milvus_config
+    from config.minio_config import minio_config
+    from utils.milvus_utils import escape_milvus_string, get_milvus_client
+    from utils.minio_utils import get_minio_client
+
+    path = local_file(record)
+    if path is None or not path.is_file():
+        client = get_minio_client()
+        for key in object_keys(record, client, minio_config.bucket_name, path):
+            try:
+                client.stat_object(minio_config.bucket_name, key)
+                break
+            except S3Error as exc:
+                if exc.code not in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+                    raise
+        else:
+            raise HTTPException(status_code=409, detail="原文档和备份均不存在，无法恢复，请重新上传")
+
+    if record["status"] == "completed":
+        client = get_milvus_client()
+        if record.get("vector_key"):
+            expression = f"source_task_id == '{escape_milvus_string(record['vector_key'])}'"
+        else:
+            title = escape_milvus_string(Path(record["filename"]).stem)
+            expression = f"file_title == '{title}' and not exists source_task_id"
+        if not client.has_collection(milvus_config.chunks_collection) or not client.query(
+            collection_name=milvus_config.chunks_collection,
+            filter=expression, output_fields=["file_title"], limit=1,
+        ):
+            raise HTTPException(status_code=409, detail="文档知识数据已缺失，无法恢复，请重新上传")
+
+
 def cleanup_document(record: dict[str, Any], delete_images: bool) -> None:
     # 延迟导入，独立的单元测试不连接外部存储，也不加载模型。
     from config.milvus_config import milvus_config

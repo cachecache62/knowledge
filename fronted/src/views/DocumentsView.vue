@@ -3,6 +3,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reacti
 import AppIcon from '../components/AppIcon.vue'
 import { IMPORT_API_BASE, requestBlob, requestJson } from '../api.js'
 
+const props = defineProps({ trash: { type: Boolean, default: false } })
 const documents = ref([])
 const total = ref(0)
 const loading = ref(false)
@@ -15,6 +16,7 @@ const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.va
 const hasFilters = computed(() => Boolean(appliedFilters.keyword || appliedFilters.status))
 const statusLabels = { pending: '待处理', processing: '处理中', completed: '已完成', failed: '失败' }
 const downloading = reactive(new Set())
+const restoring = reactive(new Set())
 const deleteTarget = ref(null)
 const deleting = ref(false)
 const deleteError = ref('')
@@ -46,7 +48,7 @@ async function loadList(showNotice = false) {
   })
   if (appliedFilters.status) params.set('status', appliedFilters.status)
   try {
-    const data = await requestJson(IMPORT_API_BASE, '/documents?' + params, {
+    const data = await requestJson(IMPORT_API_BASE, (props.trash ? '/documents/trash?' : '/documents?') + params, {
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
     })
     if (activeRequest !== controller || controller.signal.aborted) return
@@ -58,7 +60,7 @@ async function loadList(showNotice = false) {
       return
     }
     documents.value = data.items
-    if (showNotice) notify('文档列表已刷新。')
+    if (showNotice) notify(props.trash ? '回收站已刷新。' : '文档列表已刷新。')
   } catch (error) {
     if (activeRequest === controller && !controller.signal.aborted) {
       loadError.value = '加载文档失败：' + error.message
@@ -227,7 +229,7 @@ async function confirmDelete() {
     })
     deleting.value = false
     closeDelete()
-    notify('文档及对应知识数据已删除。')
+    notify('文档已移入回收站，可随时恢复。')
     if (active) await loadList()
   } catch (error) {
     if (error.status === 404) {
@@ -242,6 +244,29 @@ async function confirmDelete() {
     }
   } finally {
     deleting.value = false
+  }
+}
+
+async function restoreDocument(item) {
+  if (!item.can_restore || restoring.has(item.task_id)) return
+  restoring.add(item.task_id)
+  try {
+    await requestJson(IMPORT_API_BASE, '/documents/' + encodeURIComponent(item.task_id) + '/restore', {
+      method: 'POST', signal: AbortSignal.timeout(30000),
+    })
+    notify('文档已恢复，可在文档管理中查看。')
+    if (active) await loadList()
+  } catch (error) {
+    if (error.status === 404) {
+      notify('文档已不存在，列表已更新。', true)
+      if (active) await loadList()
+    } else {
+      notify(error.name === 'TimeoutError'
+        ? '恢复结果尚未确认，请刷新列表查看。'
+        : '恢复失败：' + error.message, true)
+    }
+  } finally {
+    restoring.delete(item.task_id)
   }
 }
 
@@ -269,7 +294,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="documents-page">
     <div class="documents-topline">
-      <span>管理知识内容，让每一次回答都有据可依。</span>
+      <span>{{ trash ? '找回误删文档，让知识继续可用。' : '管理知识内容，让每一次回答都有据可依。' }}</span>
       <button class="document-button" :disabled="loading" @click="loadList(true)">
         <AppIcon name="refresh" :size="15" />{{ loading ? '刷新中…' : '刷新列表' }}
       </button>
@@ -278,10 +303,16 @@ onBeforeUnmount(() => {
     <section class="documents-panel" aria-labelledby="documents-title">
       <header class="documents-heading">
         <div>
-          <div class="documents-title-line"><h1 id="documents-title">知识库文档管理</h1></div>
-          <p>查看文档导入状态，下载原始文件，或删除不再需要的文档及对应知识数据。</p>
+          <div class="documents-title-line"><h1 id="documents-title">{{ trash ? '回收站' : '知识库文档管理' }}</h1></div>
+          <p>{{ trash ? '已删除的文档会保留在这里。恢复后可重新查看，已完成导入的文档将继续参与知识检索。' : '查看文档导入状态、下载原始文件，或将不再需要的文档移入回收站。' }}</p>
         </div>
-        <RouterLink to="/import" class="document-button primary"><AppIcon name="upload" :size="16" />上传文档</RouterLink>
+        <div class="documents-heading-actions">
+          <RouterLink v-if="trash" to="/documents" class="document-button"><AppIcon name="file" :size="16" />返回文档管理</RouterLink>
+          <template v-else>
+            <RouterLink to="/trash" class="document-button"><AppIcon name="trash" :size="16" />回收站</RouterLink>
+            <RouterLink to="/import" class="document-button primary"><AppIcon name="upload" :size="16" />上传文档</RouterLink>
+          </template>
+        </div>
       </header>
 
       <div class="documents-body">
@@ -294,11 +325,11 @@ onBeforeUnmount(() => {
           <button type="button" class="document-button" @click="resetFilters">重置</button>
         </form>
 
-        <div class="documents-list-heading"><span>{{ hasFilters ? '筛选结果' : '全部文档' }} <strong>{{ total }}</strong></span><span>仅展示当前账号上传的文档</span></div>
+        <div class="documents-list-heading"><span>{{ hasFilters ? '筛选结果' : trash ? '已删除文档' : '全部文档' }} <strong>{{ total }}</strong></span><span>{{ trash ? '仅展示当前账号删除的自有文档' : '仅展示当前账号上传的文档' }}</span></div>
         <div v-if="loadError" class="documents-load-error" role="alert"><AppIcon name="info" :size="18" /><span>{{ loadError }}</span><button class="document-link" @click="loadList()">重新加载</button></div>
-        <div class="documents-table-scroll" role="region" aria-label="知识库文档列表" :aria-busy="loading" tabindex="0">
+        <div class="documents-table-scroll" role="region" :aria-label="trash ? '回收站文档列表' : '知识库文档列表'" :aria-busy="loading" tabindex="0">
           <table class="documents-table">
-            <thead><tr><th scope="col">任务 ID</th><th scope="col" class="document-title-cell">文档标题</th><th scope="col">适用范围</th><th scope="col">导入状态</th><th scope="col">创建时间（北京）</th><th scope="col">更新时间（北京）</th><th scope="col" class="document-actions-cell">操作</th></tr></thead>
+            <thead><tr><th scope="col">任务 ID</th><th scope="col" class="document-title-cell">文档标题</th><th scope="col">适用范围</th><th scope="col">{{ trash ? '原导入状态' : '导入状态' }}</th><th scope="col">创建时间（北京）</th><th scope="col">{{ trash ? '删除时间（北京）' : '更新时间（北京）' }}</th><th scope="col" class="document-actions-cell">操作</th></tr></thead>
             <tbody>
               <tr v-for="item in documents" :key="item.task_id">
                 <td class="document-id-cell" :title="item.task_id">{{ item.task_id.slice(0, 8) }}</td>
@@ -306,13 +337,18 @@ onBeforeUnmount(() => {
                 <td><span class="document-scope">{{ item.scope === 'shared_kb' ? '共享知识库' : item.scope }}</span></td>
                 <td><span class="document-status" :class="item.status"><i></i>{{ statusLabels[item.status] || item.status }}</span></td>
                 <td class="document-date">{{ formatDate(item.created_at) }}</td>
-                <td class="document-date">{{ formatDate(item.updated_at) }}</td>
+                <td class="document-date">{{ formatDate(trash ? item.deleted_at : item.updated_at) }}</td>
                 <td><div class="document-row-actions">
+                  <template v-if="trash">
+                    <button class="document-link document-action-button" :disabled="!item.can_restore || restoring.has(item.task_id)" :title="item.can_restore ? '恢复到文档管理' : '此文档已由旧版本清理，无法恢复，请重新上传'" :aria-label="'恢复 ' + item.filename" @click="restoreDocument(item)"><AppIcon name="history" :size="14" />{{ restoring.has(item.task_id) ? '恢复中…' : item.can_restore ? '恢复' : '无法恢复' }}</button>
+                  </template>
+                  <template v-else>
                   <button class="document-link document-action-button" :disabled="downloading.has(item.task_id) || deleting && deleteTarget?.task_id === item.task_id" :aria-label="'下载 ' + item.filename" @click="downloadDocument(item)"><AppIcon name="download" :size="14" />{{ downloading.has(item.task_id) ? '下载中…' : '下载' }}</button>
-                  <button class="document-link danger document-action-button" :disabled="isImporting(item) || deleting || downloading.has(item.task_id)" :title="isImporting(item) ? '文档导入完成或失败后才能删除' : '删除原文件及对应知识数据'" :aria-label="'删除 ' + item.filename" @click="askDelete(item)"><AppIcon name="trash" :size="14" />删除</button>
+                  <button class="document-link danger document-action-button" :disabled="isImporting(item) || deleting || downloading.has(item.task_id)" :title="isImporting(item) ? '文档导入完成或失败后才能删除' : '移入回收站，可恢复'" :aria-label="'删除 ' + item.filename" @click="askDelete(item)"><AppIcon name="trash" :size="14" />删除</button>
+                  </template>
                 </div></td>
               </tr>
-              <tr v-if="!documents.length"><td colspan="7"><div class="documents-empty"><AppIcon name="file" :size="30" /><strong>{{ loading ? '正在加载文档…' : loadError ? '文档加载失败' : hasFilters ? '没有找到符合条件的文档' : '暂无文档' }}</strong><p v-if="!loading && !loadError">{{ hasFilters ? '试试其他关键词，或清空筛选条件。' : '上传一份 PDF 或 Markdown 文档，开始建立知识库。' }}</p><button v-if="hasFilters && !loading" class="document-button" @click="resetFilters">清空筛选</button></div></td></tr>
+              <tr v-if="!documents.length"><td colspan="7"><div class="documents-empty"><AppIcon :name="trash ? 'trash' : 'file'" :size="30" /><strong>{{ loading ? '正在加载文档…' : loadError ? '文档加载失败' : hasFilters ? '没有找到符合条件的文档' : trash ? '回收站为空' : '暂无文档' }}</strong><p v-if="!loading && !loadError">{{ hasFilters ? '试试其他关键词，或清空筛选条件。' : trash ? '移入回收站的文档会显示在这里，你可以随时恢复。' : '上传一份 PDF 或 Markdown 文档，开始建立知识库。' }}</p><button v-if="hasFilters && !loading" class="document-button" @click="resetFilters">清空筛选</button></div></td></tr>
             </tbody>
           </table>
         </div>
@@ -322,18 +358,18 @@ onBeforeUnmount(() => {
         </footer>
       </div>
     </section>
-    <p class="documents-footer-note">原文可下载，资料可管理。<span>导入中的文档暂不能删除。</span></p>
+    <p class="documents-footer-note">{{ trash ? '回收站中的文档不参与知识检索。' : '原文可下载，资料可管理。' }}<span>{{ trash ? '旧版本已清理的文档无法恢复，请重新上传。' : '导入中的文档暂不能删除，删除后可在回收站恢复。' }}</span></p>
     <div v-if="notice" class="document-toast" :class="{ error: noticeError }" :role="noticeError ? 'alert' : 'status'"><AppIcon :name="noticeError ? 'info' : 'check'" :size="17" /><span>{{ notice }}</span><button class="icon-button" aria-label="关闭提示" @click="notice = ''"><AppIcon name="close" :size="15" /></button></div>
 
     <dialog ref="deleteDialog" class="document-dialog" aria-labelledby="delete-document-title" aria-describedby="delete-document-description" @cancel.prevent="closeDelete">
       <template v-if="deleteTarget">
-        <header><div><span class="document-dialog-eyebrow">资料库 · 文档管理</span><h2 id="delete-document-title">删除文档</h2></div><button class="icon-button" :disabled="deleting" aria-label="关闭弹窗" @click="closeDelete"><AppIcon name="close" /></button></header>
+        <header><div><span class="document-dialog-eyebrow">资料库 · 文档管理</span><h2 id="delete-document-title">移入回收站</h2></div><button class="icon-button" :disabled="deleting" aria-label="关闭弹窗" @click="closeDelete"><AppIcon name="close" /></button></header>
         <div class="document-confirm-content">
           <div class="document-confirm-icon danger"><AppIcon name="trash" :size="24" /></div>
-          <p>确定删除「{{ deleteTarget.filename }}」吗？</p>
-          <p id="delete-document-description" class="document-dialog-description">将清理原文档、备份和对应知识切片，并将文档标记为已删除；数据库记录及上传者归属会保留。共享图片仍被其他文档使用时会保留。原文件清理后无法恢复；历史对话中的已有回答不会改变。</p>
+          <p>确定将「{{ deleteTarget.filename }}」移入回收站吗？</p>
+          <p id="delete-document-description" class="document-dialog-description">移入后，文档将不再参与知识检索。原文件和知识数据会保留，你可以在回收站恢复；历史对话中的已有回答不会改变。</p>
           <p v-if="deleteError" class="message-error" role="alert">{{ deleteError }}</p>
-          <footer><button ref="cancelDeleteButton" class="document-button" :disabled="deleting" @click="closeDelete">取消</button><button class="document-button danger-solid" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在删除…' : '确认删除文档' }}</button></footer>
+          <footer><button ref="cancelDeleteButton" class="document-button" :disabled="deleting" @click="closeDelete">取消</button><button class="document-button danger-solid" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在移入…' : '移入回收站' }}</button></footer>
         </div>
       </template>
     </dialog>

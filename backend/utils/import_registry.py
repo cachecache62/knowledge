@@ -9,6 +9,7 @@ from sqlalchemy import (
     Column,
     Boolean,
     DateTime,
+    Integer,
     MetaData,
     String,
     Table,
@@ -53,6 +54,8 @@ documents = Table(
     Column("active_hash", String(64), nullable=True),
     Column("status", String(16), nullable=False),
     Column("is_deleted", Boolean, nullable=False, default=False, server_default=text("0")),
+    Column("deleted_at", DateTime, nullable=True),
+    Column("deleted_by", Integer, nullable=True),
     Column("created_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     Column("error", Text, nullable=False),
@@ -87,6 +90,8 @@ class ImportRegistry:
             ("object_key", "VARCHAR(1024) NULL"),
             ("vector_key", "VARCHAR(36) NULL"),
             ("is_deleted", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("deleted_at", "DATETIME NULL"),
+            ("deleted_by", "INTEGER NULL"),
         )
         for name, definition in definitions:
             if name not in existing:
@@ -130,36 +135,82 @@ class ImportRegistry:
             raise HTTPException(status_code=404, detail="未找到此文档")
         return dict(row)
 
-    def delete_document(
-        self, user_id: int, task_id: str,
-        cleanup: Callable[[dict[str, Any], bool], None],
-    ) -> None:
-        # 在清理期间锁住记录，避免重复删除；外部清理失败时保留登记和去重占位，允许重试。
+    def delete_document(self, user_id: int, task_id: str) -> None:
+        # 只更新登记；文件、备份、图片和向量全部保留，供恢复使用。
         with self.engine.begin() as connection:
             row = connection.execute(
                 select(documents).join(import_tasks, documents.c.task_id == import_tasks.c.task_id)
                 .where(documents.c.scope == self.scope, documents.c.task_id == task_id,
-                       documents.c.is_deleted.is_(False),
                        import_tasks.c.user_id == user_id).with_for_update()
             ).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="未找到此文档")
+            if row["is_deleted"]:
+                return
             if row["status"] in {"pending", "processing"}:
                 raise HTTPException(status_code=409, detail="文档正在导入，请等待处理结束后再删除")
             others = connection.execute(
                 select(documents.c.filename).where(
-                    documents.c.task_id != task_id, documents.c.is_deleted.is_(False),
+                    documents.c.task_id != task_id,
                 )
             ).scalars().all()
             stem = Path(row["filename"]).stem
             if not row["vector_key"] and any(Path(name).stem == stem for name in others):
                 raise HTTPException(status_code=409, detail="旧文档存在同名记录，无法安全确认向量归属，暂不能删除")
-            delete_images = not any(Path(name).stem.replace(" ", "") == stem.replace(" ", "") for name in others)
-            cleanup(dict(row), delete_images)
-            # 保留文档原始记录和上传者归属，只标记删除并释放文件指纹占位。
             connection.execute(update(documents).where(documents.c.task_id == task_id).values(
-                is_deleted=True, active_hash=None, updated_at=beijing_now(),
+                is_deleted=True, active_hash=None, deleted_at=utcnow(),
+                deleted_by=user_id, updated_at=utcnow(),
             ))
+
+    def restore_document(
+        self, user_id: int, task_id: str,
+        validate: Callable[[dict[str, Any]], None],
+    ) -> None:
+        try:
+            with self.engine.begin() as connection:
+                row = connection.execute(
+                    select(documents).join(import_tasks, documents.c.task_id == import_tasks.c.task_id)
+                    .where(documents.c.scope == self.scope, documents.c.task_id == task_id,
+                           import_tasks.c.user_id == user_id).with_for_update()
+                ).mappings().first()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="未找到此文档")
+                if not row["is_deleted"]:
+                    return
+                # 新增字段为空的旧删除记录已经清理过存储，不能通过翻转标记恢复。
+                if row["deleted_at"] is None:
+                    raise HTTPException(status_code=409, detail="此文档已由旧版本清理，无法恢复，请重新上传")
+                active_hash = row["file_hash"] if row["status"] == "completed" else None
+                if active_hash is not None:
+                    duplicate = connection.execute(select(documents.c.task_id).where(
+                        documents.c.scope == self.scope, documents.c.active_hash == active_hash,
+                        documents.c.task_id != task_id,
+                    )).first()
+                    if duplicate is not None:
+                        raise HTTPException(status_code=409, detail="知识库中已存在相同内容的文档，无法重复恢复")
+                if not row["vector_key"]:
+                    names = connection.execute(select(documents.c.filename).where(
+                        documents.c.task_id != task_id,
+                    )).scalars().all()
+                    if any(Path(name).stem == Path(row["filename"]).stem for name in names):
+                        raise HTTPException(status_code=409, detail="旧文档存在同名记录，无法安全确认向量归属")
+                validate(dict(row))
+                connection.execute(update(documents).where(documents.c.task_id == task_id).values(
+                    is_deleted=False, deleted_at=None, deleted_by=None,
+                    active_hash=active_hash, updated_at=beijing_now(),
+                ))
+        except IntegrityError as exc:
+            # 处理与另一个上传/恢复事务之间的并发唯一键冲突，整个恢复事务回滚。
+            raise HTTPException(status_code=409, detail="知识库中已存在相同内容的文档，无法重复恢复") from exc
+
+    def retrieval_sources(self) -> list[dict[str, Any]]:
+        # 共享知识库沿用 scope 范围，不按上传者缩小问答检索权限。
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(
+                documents.c.task_id, documents.c.vector_key, documents.c.filename,
+                documents.c.scope, documents.c.status, documents.c.is_deleted,
+            )).mappings().all()
+        return [dict(row) for row in rows]
 
     def claim(
         self,
@@ -254,6 +305,7 @@ class ImportRegistry:
         status: str | None = None,
         page: int = 1,
         page_size: int = 10,
+        deleted: bool = False,
     ) -> dict[str, Any]:
         # 通过任务归属表，只查询当前用户上传的文档。
         source = documents.join(
@@ -263,7 +315,7 @@ class ImportRegistry:
 
         conditions = [
             documents.c.scope == self.scope,
-            documents.c.is_deleted.is_(False),
+            documents.c.is_deleted.is_(deleted),
             import_tasks.c.user_id == user_id,
         ]
 
@@ -286,13 +338,15 @@ class ImportRegistry:
             documents.c.created_at,
             documents.c.updated_at,
         ]
+        if deleted:
+            fields.append(documents.c.deleted_at)
 
         statement = (
             select(*fields)
             .select_from(source)
             .where(*conditions)
             .order_by(
-                documents.c.updated_at.desc(),
+                (documents.c.deleted_at if deleted else documents.c.updated_at).desc(),
                 documents.c.task_id.desc(),
             )
             .offset((page - 1) * page_size)
@@ -314,6 +368,11 @@ class ImportRegistry:
             # 明确携带时区，前端才能正确转换为北京时间。
             for field in ("created_at", "updated_at"):
                 item[field] = item[field].replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ).isoformat()
+
+            if deleted:
+                item["can_restore"] = item["deleted_at"] is not None
+                if item["deleted_at"] is not None:
+                    item["deleted_at"] = item["deleted_at"].replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ).isoformat()
 
             items.append(item)
 

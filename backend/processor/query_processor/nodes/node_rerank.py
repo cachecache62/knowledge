@@ -65,6 +65,8 @@ class NodeRerank(NodeBase):
                 "content": rrf_doc.get('content'),
                 "title": rrf_doc.get('title'),
                 "chunk_id": rrf_doc.get('chunk_id'),
+                "source_task_id": rrf_doc.get('source_task_id'),
+                "file_title": rrf_doc.get('file_title'),
                 "url": None,
                 "source": "local"
             }

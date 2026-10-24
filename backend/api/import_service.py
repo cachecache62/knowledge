@@ -21,7 +21,7 @@ from tool.logger import logger
 from utils.minio_utils import get_minio_client
 
 from utils.import_registry import ImportRegistry, get_import_registry
-from utils.document_files import cleanup_document, download_document
+from utils.document_files import download_document, ensure_document_recoverable
 
 from utils.task_utils import (
     TASK_STATUS_COMPLETED,
@@ -390,18 +390,45 @@ async def download_document_file(task_id: uuid.UUID, user: CurrentUser) -> FileR
         raise HTTPException(status_code=503, detail="文档存储暂时不可用，请稍后重试") from exc
 
 
-@app.delete("/documents/{task_id}", summary="删除文档及对应知识数据")
+@app.get("/documents/trash", summary="查询当前用户的回收站")
+async def list_trashed_documents(
+    user: CurrentUser,
+    keyword: str = Query("", max_length=200),
+    status: Literal["pending", "processing", "completed", "failed"] | None = None,
+    page: int = Query(1, ge=1, le=100000),
+    page_size: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+    return await run_in_threadpool(
+        registry.list_documents, user.id, keyword.strip(), status, page, page_size, True,
+    )
+
+
+@app.post("/documents/{task_id}/restore", summary="恢复回收站文档")
+async def restore_document_file(task_id: uuid.UUID, user: CurrentUser) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+    try:
+        await run_in_threadpool(registry.restore_document, user.id, str(task_id), ensure_document_recoverable)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[%s] 文档恢复未完成", task_id)
+        raise HTTPException(status_code=503, detail="文档恢复未完成，请稍后重试") from exc
+    return {"task_id": str(task_id), "message": "文档已恢复"}
+
+
+@app.delete("/documents/{task_id}", summary="将文档移入回收站")
 async def delete_document_file(task_id: uuid.UUID, user: CurrentUser) -> dict[str, Any]:
     registry = await run_in_threadpool(get_import_registry)
     try:
-        await run_in_threadpool(registry.delete_document, user.id, str(task_id), cleanup_document)
+        await run_in_threadpool(registry.delete_document, user.id, str(task_id))
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("[%s] 文档删除未完成", task_id)
         raise HTTPException(status_code=503, detail="文档删除未完成，记录已保留，请稍后重试") from exc
     clear_task(str(task_id))
-    return {"task_id": str(task_id), "message": "文档及对应知识数据已删除"}
+    return {"task_id": str(task_id), "message": "文档已移入回收站"}
 
 
 if __name__ == "__main__":

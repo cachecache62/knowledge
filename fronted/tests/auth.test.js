@@ -5,6 +5,7 @@ import { safeDestination } from '../src/utils/authRedirect.js'
 test('登录后只跳转到允许的业务路由', () => {
   assert.equal(safeDestination('/import'), '/import')
   assert.equal(safeDestination('/documents'), '/documents')
+  assert.equal(safeDestination('/trash'), '/trash')
   assert.equal(safeDestination('/chat?source=login'), '/chat?source=login')
   for (const path of ['https://evil.example', '//evil.example', '/login', '/register', '/chat/../../login', null, ['/import']]) {
     assert.equal(safeDestination(path), '/chat')
