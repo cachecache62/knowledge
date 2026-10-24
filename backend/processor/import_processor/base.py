@@ -14,6 +14,7 @@ import colorlog
 from processor.import_processor.import_config import ImportConfig, get_config
 from processor.import_processor.exceptions import ImportProcessError
 from utils.task_utils import add_done_task, add_running_task
+from utils.import_trace import trace_node
 
 """
 导入流程节点基类
@@ -103,7 +104,9 @@ class BaseNode(ABC):
             add_running_task(state["task_id"], self.name)
 
             # 2. 执行节点
-            result = self.process(state)
+            with trace_node(self.name, state, self.logger) as capture_output:
+                result = self.process(state)
+                capture_output(result)
 
             # 结束：记录节点完成状态
             add_done_task(state["task_id"], self.name)

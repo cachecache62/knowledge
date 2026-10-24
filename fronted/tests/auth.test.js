@@ -6,6 +6,9 @@ test('登录后只跳转到允许的业务路由', () => {
   assert.equal(safeDestination('/import'), '/import')
   assert.equal(safeDestination('/documents'), '/documents')
   assert.equal(safeDestination('/trash'), '/trash')
+  assert.equal(safeDestination('/import-traces'), '/import-traces')
+  const tracePath = '/import-traces/7633e484-3bfa-4bdc-a055-05b7c8bb3e99'
+  assert.equal(safeDestination(tracePath), tracePath)
   assert.equal(safeDestination('/chat?source=login'), '/chat?source=login')
   for (const path of ['https://evil.example', '//evil.example', '/login', '/register', '/chat/../../login', null, ['/import']]) {
     assert.equal(safeDestination(path), '/chat')

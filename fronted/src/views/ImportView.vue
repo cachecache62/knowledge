@@ -270,6 +270,7 @@ onBeforeUnmount(() => {
               <li v-if="!item.done.length && !item.running.length">暂无日志</li>
             </ul>
           </details>
+          <RouterLink v-if="item.taskId" :to="'/import-traces/' + item.taskId" class="import-trace-link">查看导入路由记录 →</RouterLink>
           <p v-if="item.error" class="message-error" role="alert">
             {{ item.error }}
           </p>
@@ -292,3 +293,8 @@ onBeforeUnmount(() => {
     </div>
   </main>
 </template>
+
+<style scoped>
+.import-trace-link { display: inline-block; margin-top: 12px; font-size: 12px; color: #356fd1; text-decoration: none; }
+.import-trace-link:hover { text-decoration: underline; }
+</style>

@@ -10,7 +10,7 @@ import types
 import unittest
 import uuid
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -354,7 +354,10 @@ class DocumentManagementTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 1)
         self.assertEqual(page["items"][0]["task_id"], second)
         self.assertTrue(page["items"][0]["can_restore"])
-        self.assertTrue(page["items"][0]["deleted_at"].endswith("+00:00"))
+        with self.engine.connect() as connection:
+            stored_time = connection.execute(select(documents.c.deleted_at).where(documents.c.task_id == second)).scalar_one()
+        # API 可携带 UTC 或北京时间偏移，比较实际时间点。
+        self.assertEqual(datetime.fromisoformat(page["items"][0]["deleted_at"]).astimezone(timezone.utc).replace(tzinfo=None), stored_time)
         self.assertEqual(self.client.get("/documents/trash?keyword=first").json()["items"][0]["task_id"], first)
         self.assertEqual(self.client.get("/documents/trash?status=failed").json()["total"], 1)
         self.assertEqual(self.client.get("/documents/trash?page_size=101").status_code, 422)

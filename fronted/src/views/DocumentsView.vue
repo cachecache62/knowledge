@@ -343,6 +343,7 @@ onBeforeUnmount(() => {
                     <button class="document-link document-action-button" :disabled="!item.can_restore || restoring.has(item.task_id)" :title="item.can_restore ? '恢复到文档管理' : '此文档已由旧版本清理，无法恢复，请重新上传'" :aria-label="'恢复 ' + item.filename" @click="restoreDocument(item)"><AppIcon name="history" :size="14" />{{ restoring.has(item.task_id) ? '恢复中…' : item.can_restore ? '恢复' : '无法恢复' }}</button>
                   </template>
                   <template v-else>
+                  <RouterLink class="document-link document-action-button" :to="'/import-traces/' + item.task_id"><AppIcon name="history" :size="14" />导入记录</RouterLink>
                   <button class="document-link document-action-button" :disabled="downloading.has(item.task_id) || deleting && deleteTarget?.task_id === item.task_id" :aria-label="'下载 ' + item.filename" @click="downloadDocument(item)"><AppIcon name="download" :size="14" />{{ downloading.has(item.task_id) ? '下载中…' : '下载' }}</button>
                   <button class="document-link danger document-action-button" :disabled="isImporting(item) || deleting || downloading.has(item.task_id)" :title="isImporting(item) ? '文档导入完成或失败后才能删除' : '移入回收站，可恢复'" :aria-label="'删除 ' + item.filename" @click="askDelete(item)"><AppIcon name="trash" :size="14" />删除</button>
                   </template>

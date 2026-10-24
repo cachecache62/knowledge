@@ -2,6 +2,8 @@
 
 import hashlib
 import os
+import json
+import time
 # import shutil
 import uuid
 from datetime import datetime
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, StreamingResponse
 
@@ -22,6 +24,7 @@ from utils.minio_utils import get_minio_client
 
 from utils.import_registry import ImportRegistry, get_import_registry
 from utils.document_files import download_document, ensure_document_recoverable
+from utils.import_trace import ImportTraceStore, ImportTraceRecorder, now as trace_now, start_trace, trace_scope
 
 from utils.task_utils import (
     TASK_STATUS_COMPLETED,
@@ -55,6 +58,7 @@ def run_graph_task(
     file_dir: str,
     import_file_path: str,
     registry: ImportRegistry,
+    trace: ImportTraceRecorder | None = None,
 ) -> None:
     """
     在后台线程中运行 LangGraph 导入流程。
@@ -71,16 +75,21 @@ def run_graph_task(
             "file_dir": file_dir,
             "import_file_path": import_file_path,
         }
-        workflow = KBImportWorkflow()
-        for _event in workflow.run(initial_state, stream=True):
-            pass
+        with trace_scope(trace):
+            workflow = KBImportWorkflow()
+            for _event in workflow.run(initial_state, stream=True):
+                pass
 
          # 整个流程成功后，才登记为已完成。
         registry.set_status(task_id, "completed")
 
         update_task_status(task_id, TASK_STATUS_COMPLETED)
+        if trace is not None:
+            trace.finish("completed")
 
     except Exception as exc:
+        if trace is not None:
+            trace.finish("failed", str(exc))
         set_task_result(task_id, "error", str(exc))
         update_task_status(task_id, TASK_STATUS_FAILED)
 
@@ -145,6 +154,9 @@ async def upload_files(
     results = []
 
     for file, filename in zip(files, filenames):
+        started_at = trace_now()
+        started_timer = time.perf_counter()
+        trace = None
         task_id = str(uuid.uuid4())
         # await run_in_threadpool(store.remember_import, user.id, task_id)
         file_dir = data_dir / task_id
@@ -203,10 +215,21 @@ async def upload_files(
                 user.id,
                 task_id,
             )
+            trace = await run_in_threadpool(
+                start_trace, registry.engine, task_id, user.id, filename, started_at, registry.scope,
+            )
+            if trace is not None:
+                await run_in_threadpool(trace.begin, "upload_file", {"filename": filename, "content_type": content_type}, started_at)
+                await run_in_threadpool(
+                    trace.end, "upload_file", {"task_id": task_id, "file_hash": file_hash, "registered": True},
+                    duration_ms=max(0, int((time.perf_counter() - started_timer) * 1000)),
+                )
 
             # 5. 保留现有 MinIO 备份逻辑。
             # 备份失败仍继续本地导入。
             try:
+                if trace is not None:
+                    await run_in_threadpool(trace.begin, "backup_file", {"filename": filename})
                 minio_client = get_minio_client()
 
                 await run_in_threadpool(
@@ -220,14 +243,20 @@ async def upload_files(
                     registry.remember_storage, task_id, relative_path,
                     f"pdf_files/{day}/{task_id}/{filename}",
                 )
+                if trace is not None:
+                    await run_in_threadpool(trace.end, "backup_file", {"stored": True})
 
-            except Exception:
+            except Exception as exc:
+                if trace is not None:
+                    await run_in_threadpool(trace.end, "backup_file", {"stored": False, "fallback": "使用本地原文件继续导入"}, warnings=[str(exc)])
                 logger.exception(
                     "[%s] MinIO 备份失败，继续本地导入",
                     task_id,
                 )
 
         except Exception as exc:
+            if trace is not None:
+                await run_in_threadpool(trace.finish, "failed", str(exc))
             # 已经登记，但保存之后的准备工作失败，需要释放占位。
             if accepted:
                 try:
@@ -309,6 +338,7 @@ async def upload_files(
             str(file_dir),
             str(import_file_path),
             registry,
+            trace,
         )
 
         task_ids.append(task_id)
@@ -353,6 +383,44 @@ async def get_task_progress(
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+def import_trace_store(registry: ImportRegistry) -> ImportTraceStore:
+    store = ImportTraceStore(registry.engine, registry.scope)
+    store.create_schema()
+    return store
+
+
+@app.get("/import-traces", summary="查询当前用户的文档导入路由记录")
+async def list_import_traces(
+    user: CurrentUser, response: Response,
+    keyword: str = Query("", max_length=200),
+    status: Literal["pending", "processing", "completed", "failed"] | None = None,
+    page: int = Query(1, ge=1, le=100000), page_size: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+    store = await run_in_threadpool(import_trace_store, registry)
+    response.headers["Cache-Control"] = "private, no-store"
+    return await run_in_threadpool(store.list, user.id, keyword.strip(), status, page, page_size)
+
+
+@app.get("/import-traces/{task_id}", summary="查询导入节点时间线与输入输出")
+async def get_import_trace(task_id: uuid.UUID, user: CurrentUser, response: Response) -> dict[str, Any]:
+    registry = await run_in_threadpool(get_import_registry)
+    store = await run_in_threadpool(import_trace_store, registry)
+    response.headers["Cache-Control"] = "private, no-store"
+    return await run_in_threadpool(store.get, user.id, str(task_id))
+
+
+@app.get("/import-traces/{task_id}/export", summary="导出导入路由记录 JSON")
+async def export_import_trace(task_id: uuid.UUID, user: CurrentUser) -> Response:
+    registry = await run_in_threadpool(get_import_registry)
+    store = await run_in_threadpool(import_trace_store, registry)
+    record = await run_in_threadpool(store.get, user.id, str(task_id))
+    return Response(
+        content=json.dumps(record, ensure_ascii=False, indent=2), media_type="application/json",
+        headers={"Cache-Control": "private, no-store", "Content-Disposition": f'attachment; filename="import-trace-{task_id}.json"'},
+    )
 
 
 @app.get("/documents", summary="查询当前用户上传的文档")
